@@ -1,0 +1,39 @@
+# use_svdd=True
+# num_clients=10, num_benign=5, num_malicious=5
+# attack_type=label_flipping
+# latent_dim=128
+# total_rounds=200
+# round, test_acc, attack_success_rate, false_positive_rate
+1, 0.1000, nan, nan
+2, 0.1000, nan, nan
+3, 0.1704, nan, nan
+4, 0.2272, nan, nan
+5, 0.2901, nan, nan
+6, 0.2794, nan, nan
+7, 0.2619, nan, nan
+8, 0.3082, nan, nan
+9, 0.1934, nan, nan
+10, 0.3086, nan, nan
+11, 0.5140, nan, nan
+12, 0.1556, nan, nan
+13, 0.5990, nan, nan
+14, 0.3330, nan, nan
+15, 0.4077, nan, nan
+16, 0.6053, nan, nan
+17, 0.1287, nan, nan
+18, 0.6353, nan, nan
+19, 0.1027, nan, nan
+20, 0.6037, nan, nan
+21, 0.1302, nan, nan
+22, 0.6945, nan, nan
+23, 0.0504, nan, nan
+24, 0.6793, nan, nan
+25, 0.0763, nan, nan
+26, 0.6716, nan, nan
+27, 0.2737, nan, nan
+28, 0.6778, nan, nan
+29, 0.0510, nan, nan
+30, 0.4761, nan, nan
+31, 0.2717, nan, nan
+32, 0.7095, nan, nan
+33, 0.0511, nan, nan
