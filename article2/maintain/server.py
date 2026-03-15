@@ -15,7 +15,7 @@ from models import get_resnet18_cifar10, AutoEncoder, LATENT_DIM
 
 
 # 阶段划分与 SVDD 退火相关超参数
-PHASE1_END_ROUND = 20  # Round 1~20: AE 预训练；21~: SVDD 阶段
+PHASE1_END_ROUND = 50  # Round 1~20: AE 预训练；21~: SVDD 阶段
 
 SVDD_WARMUP_ROUNDS = 50  # SVDD 退火窗口期（前 10 个 SVDD 轮内从软到硬）
 
@@ -155,12 +155,9 @@ class FederatedServer:
                 M = torch.ones_like(M)
             self._last_M = M.detach()
 
-            # 3. 纯净集权重与中心点状态
-            d_norm = (d - median_d) / mad_d
-            d_norm_shifted = d_norm - d_norm.min()
-            weights = torch.exp(-d_norm_shifted / T) * M
-            weights_sum = weights.sum() + 1e-12
-            alpha = weights / weights_sum
+            # 3. 纯净集权重：仅按阈值 M 做硬截断，阈值内客户端均匀权重，不再使用距离
+            # alpha_i = 1/|{k:M_k=1}| if M_i==1 else 0
+            alpha = M / (M.sum() + 1e-12)
             self._last_alpha = alpha.detach()
             self._last_c = self.c.detach()
 

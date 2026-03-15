@@ -16,7 +16,7 @@ from models import get_resnet18_cifar10, AutoEncoder, LATENT_DIM
 # 阶段划分与 SVDD 退火相关超参数
 PHASE1_END_ROUND = 50  # Round 1~20: AE 预训练；21~: SVDD 阶段
 
-SVDD_WARMUP_ROUNDS = 50  # SVDD 退火窗口期（前 10 个 SVDD 轮内从软到硬）
+SVDD_WARMUP_ROUNDS = 100  # SVDD 退火窗口期（前 10 个 SVDD 轮内从软到硬）
 
 # 温度 T：从极其平缓到极其陡峭
 T_START = 5.0
@@ -133,7 +133,7 @@ class FederatedServer:
 
             k = K_START - p * (K_START - K_END)
             lambda_svdd = LAMBDA_START + p * (LAMBDA_END - LAMBDA_START)
-            beta = 0.9 * p  # 动态动量：0 -> 0.9
+            beta = 0.95 * p  # 动态动量：0 -> 0.7
 
             # 监控用：沿用 _last_T 槽位记录 beta，便于现有表格复用
             self._last_T = float(beta)
