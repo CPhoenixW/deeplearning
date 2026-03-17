@@ -6,6 +6,22 @@
 
 ---
 
+## [v0.3.0] - 2026-03-16
+
+### 新增
+- `new/` 模块：基于中心化实验验证后的 **鲁棒 AE-SVDD 联邦重构版本**，作为后续主力实验分支
+- `test_svdd/` 模块：中心化 BN 特征上的 AE/SVDD 与三层 MLP-SVDD 实验脚本，用于快速验证模型与超参是否适合当前数据分布
+
+### 变更（相对于 move/）
+- **鲁棒特征标准化 (Robust Scaling)**：
+  - 在服务端对每轮聚合得到的 BN 特征矩阵按维度使用 `median + MAD` 标准化，显著降低高斯噪声 / 恶意客户端对 AE/SVDD 的尺度污染
+- **潜在空间维度约束**：
+  - 在 `new/server.py` 中对 `latent_dim` 施加安全上限（如 `min(config.latent_dim, 64)`），缓解高维距离度量退化问题
+- **AE Warm-up 监控增强**：
+  - 为 Phase 1 增加 per-client AE L1-Loss 监测与 trimmed mask (`M`)，可以直观看到哪些客户端在当前轮被视为重构 outlier（不参与 AE 损失）
+- **联邦场景下对中心化实验结果的迁移**：
+  - 将在 `test_svdd/train_svdd_mlp.py` 中验证有效的：鲁棒标准化、Trimmed Loss、合适 latent 维度等思想迁移到联邦 AE-SVDD 管线中，同时保持 system_prompt 约束不变
+
 ## [v0.2.0] - 2026-03-13
 
 ### 新增
