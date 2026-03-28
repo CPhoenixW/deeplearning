@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
-from clients import ATTACK_REGISTRY, BaseClient, BenignClient
-from config import FedConfig
-from dataset import build_cifar10_dataloaders
-from models import build_resnet18
-from server import FederatedServer
-from utils import extract_bn_features
+try:
+    from .clients import ATTACK_REGISTRY, BaseClient, BenignClient
+    from .config import FedConfig
+    from .server import DEFENSE_REGISTRY, BaseServer
+    from .tasks import get_task
+    from .utils import extract_bn_features
+except ImportError:
+    from clients import ATTACK_REGISTRY, BaseClient, BenignClient
+    from config import FedConfig
+    from server import DEFENSE_REGISTRY, BaseServer
+    from tasks import get_task
+    from utils import extract_bn_features
 
 
 def set_seed(seed: int) -> None:
@@ -46,7 +52,10 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -
 
 
 def build_clients(
-    config: FedConfig, device: torch.device, loaders: List[DataLoader]
+    config: FedConfig,
+    device: torch.device,
+    loaders: List[DataLoader],
+    task,
 ) -> Tuple[List[BaseClient], torch.Tensor]:
     """Create benign and attack clients; return list and ground-truth labels (1=benign, 0=malicious)."""
 
@@ -61,7 +70,7 @@ def build_clients(
     clients: List[BaseClient] = []
 
     def model_fn():
-        return build_resnet18(num_classes=10)
+        return task.build_model()
 
     # Benign
     for cid in benign_ids:
@@ -72,86 +81,71 @@ def build_clients(
     if attack_cls is None:
         raise ValueError(f"Unknown attack_type: {config.attack_type}")
     for cid in malicious_ids:
-        if issubclass(attack_cls, BenignClient):
-            clients.append(attack_cls(cid, device, config, loaders[cid], model_fn))
-        else:
-            clients.append(attack_cls(cid, device, config, loaders[cid]))
+        clients.append(attack_cls(cid, device, config, loaders[cid], model_fn))
 
     return clients, gt
 
 
-def run_federated(config: FedConfig, use_svdd: bool = True) -> None:
+def resolve_defense_name(config: FedConfig, use_svdd: Optional[bool]) -> str:
+    if use_svdd is None:
+        return config.defense_type
+    return "svdd" if use_svdd else config.aggregation_method
+
+
+def run_federated(
+    config: FedConfig,
+    use_svdd: Optional[bool] = None,
+    collect_metrics: bool = False,
+) -> Optional[List[Dict[str, Any]]]:
     set_seed(config.seed)
     device = resolve_device(config)
 
-    client_loaders, test_loader = build_cifar10_dataloaders(config)
-    clients, gt = build_clients(config, device, client_loaders)
+    task = get_task(config)
+    config.num_classes = task.num_classes
 
-    # Infer BN feature dimension from a temporary model
-    tmp_model = build_resnet18(num_classes=10)
+    client_loaders, test_loader = task.build_dataloaders(config)
+    clients, gt = build_clients(config, device, client_loaders, task)
+
+    tmp_model = task.build_model()
     d_bn = extract_bn_features(tmp_model.state_dict()).numel()
 
-    server = FederatedServer(config, d_bn=d_bn, device=device)
+    def model_fn():
+        return task.build_model()
+
+    defense_name = resolve_defense_name(config, use_svdd).lower().strip()
+    server_cls = DEFENSE_REGISTRY.get(defense_name)
+    if server_cls is None:
+        raise ValueError(f"Unknown defense_type: {defense_name}")
+    server: BaseServer = server_cls(config, d_bn=d_bn, device=device, model_fn=model_fn)
 
     total_rounds = config.total_rounds
-    phase1_rounds = config.phase1_rounds
+
+    metrics_history: List[Dict[str, Any]] = []
 
     for r in range(1, total_rounds + 1):
-        global_sd = server._state_dict_for_clients()
+        global_sd = server.state_dict_for_clients()
 
         client_sds: List[Dict[str, Tensor]] = []
         for c in clients:
             local_sd = c.local_step(global_sd)
             client_sds.append(local_sd)
 
-        if not use_svdd:
-            # Pure FedAvg
-            K = len(client_sds)
-            alpha = torch.full((K,), 1.0 / K)
-            from utils import weighted_fedavg
-
-            global_sd = weighted_fedavg(client_sds, alpha)
-            server.global_model.load_state_dict(global_sd)
-            center_norm = float(0.0)
-            z_var = 0.0
-            ae_loss = 0.0
-            svdd_loss = 0.0
-            d = torch.zeros(K)
-            M = torch.ones(K)
-            alpha_out = alpha
-        else:
-            if r <= phase1_rounds:
-                center_norm, z_var, ae_loss, d, keep_mask = server.phase1_step(r, client_sds)
-                svdd_loss = 0.0
-                # Phase1 中 M 表示该客户端是否被 trimmed loss 保留（1=参与 AE 损失，0=被剪掉）
-                M = keep_mask.float()
-                alpha_out = torch.full((len(client_sds),), 1.0 / len(client_sds))
-            elif r == phase1_rounds + 1 and server.c is None:
-                center_norm, z_var = server.init_center(client_sds)
-                svdd_loss = 0.0
-                ae_loss = 0.0
-                d = torch.zeros(len(client_sds))
-                M = torch.ones(len(client_sds))
-                alpha_out = torch.full((len(client_sds),), 1.0 / len(client_sds))
-            else:
-                svdd_round = r - phase1_rounds
-                (
-                    center_norm,
-                    z_var,
-                    svdd_loss,
-                    _recon_loss,
-                    d,
-                    M,
-                    alpha_out,
-                ) = server.phase2_step(svdd_round, client_sds)  
-                ae_loss = 0.0
+        stats = server.aggregate(round_idx=r, client_state_dicts=client_sds)
+        center_norm = stats.center_norm
+        z_var = stats.z_var
+        ae_loss = stats.ae_loss
+        svdd_loss = stats.svdd_loss
+        d = stats.d
+        M = stats.m
+        alpha_out = stats.alpha
+        phase = stats.phase
 
         # Evaluation
         test_acc, correct, total = evaluate(server.global_model, test_loader, device)
 
         # Monitoring metrics
         z_var_scalar = z_var
-        if z_var_scalar < 1e-6 and use_svdd and r > phase1_rounds:
+        if z_var_scalar < 1e-6 and defense_name == "svdd":
             print(f"[WARN] Encoder collapse detected at round {r}: var={z_var_scalar:.3e}")
 
         # Ground-truth based TPR / FPR
@@ -167,18 +161,24 @@ def run_federated(config: FedConfig, use_svdd: bool = True) -> None:
                 fpr = float((rejected[benign_mask]).float().mean().item())
             else:
                 fpr = 0.0
+            rr = float(rejected.float().mean().item())
+
+            tp = ((rejected) & mal_mask).sum().item()
+            fp = ((rejected) & benign_mask).sum().item()
+            tn = ((~rejected) & benign_mask).sum().item()
+            fn = ((~rejected) & mal_mask).sum().item()
+            total_clients = max(1, tp + fp + tn + fn)
+            dar = float((tp + tn) / total_clients)
+            dpr = float(tp / max(1, tp + fp))
 
         # Pretty monitor output
-        phase = "AE Warm-up" if r <= phase1_rounds else ("SVDD Filtering" if use_svdd else "FedAvg Baseline")
+        monitor_items = [("Task", config.task_name)] + list(stats.monitor_items)
         print_monitor_round(
             round_idx=r,
             phase=phase,
             num_clients=config.num_clients,
             num_benign=config.num_benign,
-            center_norm=center_norm if use_svdd else float("nan"),
-            z_var=z_var_scalar,
-            ae_loss=ae_loss if r <= phase1_rounds else float("nan"),
-            svdd_loss=svdd_loss if (use_svdd and r > phase1_rounds) else float("nan"),
+            monitor_items=monitor_items,
             test_acc=test_acc,
             test_correct=correct,
             test_total=total,
@@ -188,8 +188,28 @@ def run_federated(config: FedConfig, use_svdd: bool = True) -> None:
             gt=gt,
             tpr=tpr,
             fpr=fpr,
-            show_detection=use_svdd,
+            show_detection=stats.show_detection,
         )
+
+        if collect_metrics:
+            metrics_history.append(
+                {
+                    "round": r,
+                    "phase": phase,
+                    "test_acc": float(test_acc),
+                    "test_correct": int(correct),
+                    "test_total": int(total),
+                    "malicious_detection_rate": float(tpr),  # TPR
+                    "benign_false_positive_rate": float(fpr),  # FPR
+                    "dar": float(dar),
+                    "dpr": float(dpr),
+                    "rr": float(rr),
+                }
+            )
+
+    if collect_metrics:
+        return metrics_history
+    return None
 
 
 def print_monitor_round(
@@ -197,10 +217,7 @@ def print_monitor_round(
     phase: str,
     num_clients: int,
     num_benign: int,
-    center_norm: float,
-    z_var: float,
-    ae_loss: float,
-    svdd_loss: float,
+    monitor_items: List[Tuple[str, str]],
     test_acc: float,
     test_correct: int,
     test_total: int,
@@ -221,14 +238,8 @@ def print_monitor_round(
     )
     print(f"|Clients {num_clients:<2d}  Benign {num_benign:<2d}  Malicious {num_mal:<2d}".ljust(77) + "|")
     print("+-----------------------------------------------------------------------------+")
-
-    center_str = f"{center_norm:.6f}" if not np.isnan(center_norm) else "N/A"
-    print(f"| Center L2-Norm           | {center_str:<47}|")
-    print(f"| Z-Space Variance         | {z_var:<47.6f}|")
-    if round_idx <= 50:
-        print(f"| AE L1-Loss               | {ae_loss:<47.6f}|")
-    else:
-        print(f"| SVDD Loss                | {svdd_loss:<47.6f}|")
+    for key, value in monitor_items:
+        print(f"| {key:<24} | {value:<47}|")
     acc_str = f"{test_acc:.4f}  ({test_correct}/{test_total})"
     print(f"| Test Accuracy            | {acc_str:<47}|")
     print("+-----------------------------------------------------------------------------+")
@@ -288,5 +299,5 @@ def print_monitor_round(
 
 if __name__ == "__main__":
     cfg = FedConfig()
-    run_federated(cfg, use_svdd=True)
-
+    cfg.aggregation_method = "fedavg"
+    run_federated(cfg, use_svdd=False)

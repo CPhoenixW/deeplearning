@@ -1,8 +1,13 @@
 # 数据集
 data/
 */data/
+article2/test/data/
+article2/test/log/
 cifar-10-batches-py/
 */cifar-10-batches-py/
+
+# 本地大权重（勿提交）
+article2/*.pth
 
 # 虚拟环境
 dl/

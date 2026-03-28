@@ -6,7 +6,7 @@ You are an expert PyTorch engineer. Your task is to implement a **two-phase AE-S
 
 ## 1. Project Overview
 
-A federated learning system where a central server coordinates K clients to jointly train a ResNet18 on CIFAR-10. A fraction of clients are **malicious** (attack types: Gaussian noise injection, label flipping, sign flipping, or user-defined). The server uses a two-phase AutoEncoder → Deep SVDD pipeline to detect and down-weight malicious model updates during aggregation.
+A federated learning system where a central server coordinates K clients to jointly train a ResNet18 on CIFAR-10. A fraction of clients are **malicious** (attack types: Gaussian noise injection, label flipping, sign flipping, backdoor, LIE-style update attack, or user-defined). The server uses a two-phase AutoEncoder → Deep SVDD pipeline to detect and down-weight malicious model updates during aggregation.
 
 **Key insight**: Each client uploads a full model state_dict. The server extracts BatchNorm statistics as a compact fingerprint of client behavior, then uses an AutoEncoder + SVDD to score each client's trustworthiness.
 

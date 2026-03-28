@@ -15,12 +15,21 @@ from __future__ import annotations
 """
 
 import argparse
+import sys
+from pathlib import Path
 
 import torch
 from torch import Tensor, nn
 from torch.nn.utils import clip_grad_norm_
 
-from new.config import FedConfig
+try:
+    from new.config import FedConfig
+except ModuleNotFoundError:
+    # 兼容 `python test_svdd/train_svdd_mlp.py` 直接脚本运行
+    project_root = Path(__file__).resolve().parents[1]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    from new.config import FedConfig
 
 
 class ThreeLayerEncoder(nn.Module):
@@ -65,9 +74,15 @@ class ThreeLayerDecoder(nn.Module):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", type=str, default="cifar10.pth", help="中心化 BN 特征数据文件")
-    parser.add_argument("--ae_epochs", type=int, default=200, help="AutoEncoder 预训练轮数")
+    parser.add_argument("--ae_epochs", type=int, default=0, help="AutoEncoder 预训练轮数（0 表示跳过）")
     parser.add_argument("--epochs", type=int, default=200, help="SVDD 训练轮数")
     parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=1.0,
+        help="DASVDD 风格的 SVDD 项权重 γ（总损失 = recon + γ * svdd）",
+    )
     args = parser.parse_args()
 
     cfg = FedConfig()
@@ -98,42 +113,45 @@ def main() -> None:
 
     X_dev = X.to(device)
 
-    # ---- Phase 1: AutoEncoder 预训练（Trimmed MSE 重构）----
+    # ---- Phase 1: AutoEncoder 预训练（Trimmed MSE 重构，可选）----
     mse_loss_fn = nn.MSELoss(reduction="none")
-    for epoch in range(1, args.ae_epochs + 1):
-        perm = torch.randperm(N)
-        X_shuf = X_dev[perm]
+    if args.ae_epochs > 0:
+        for epoch in range(1, args.ae_epochs + 1):
+            perm = torch.randperm(N)
+            X_shuf = X_dev[perm]
 
-        encoder.train()
-        decoder.train()
-        total_recon = 0.0
-        total_cnt = 0
+            encoder.train()
+            decoder.train()
+            total_recon = 0.0
+            total_cnt = 0
 
-        for i in range(0, N, args.batch_size):
-            xb = X_shuf[i : i + args.batch_size]
-            z = encoder(xb)
-            x_hat = decoder(z)
-            # 每个样本的重构误差，使用 trimmed loss 只保留前 80% 最小误差
-            raw_loss = mse_loss_fn(x_hat, xb).mean(dim=1)
-            keep_ratio = 0.80
-            k_ae = max(1, int(xb.size(0) * keep_ratio))
-            loss = raw_loss.topk(k_ae, largest=False).values.mean()
+            for i in range(0, N, args.batch_size):
+                xb = X_shuf[i : i + args.batch_size]
+                z = encoder(xb)
+                x_hat = decoder(z)
+                # 每个样本的重构误差，使用 trimmed loss 只保留前 80% 最小误差
+                raw_loss = mse_loss_fn(x_hat, xb).mean(dim=1)
+                keep_ratio = 0.80
+                k_ae = max(1, int(xb.size(0) * keep_ratio))
+                loss = raw_loss.topk(k_ae, largest=False).values.mean()
 
-            opt_ae.zero_grad()
-            loss.backward()
-            clip_grad_norm_(list(encoder.parameters()) + list(decoder.parameters()), cfg.ae_grad_clip)
-            opt_ae.step()
+                opt_ae.zero_grad()
+                loss.backward()
+                clip_grad_norm_(list(encoder.parameters()) + list(decoder.parameters()), cfg.ae_grad_clip)
+                opt_ae.step()
 
-            total_recon += loss.item() * xb.size(0)
-            total_cnt += xb.size(0)
+                total_recon += loss.item() * xb.size(0)
+                total_cnt += xb.size(0)
 
-        with torch.no_grad():
-            encoder.eval()
-            Z_full = encoder(X_dev)
-            z_var = Z_full.var().item()
-        print(
-            f"[AE-MLP] Epoch {epoch:03d}  recon={total_recon / max(1, total_cnt):.4f}  z_var={z_var:.4f}"
-        )
+            with torch.no_grad():
+                encoder.eval()
+                Z_full = encoder(X_dev)
+                z_var = Z_full.var().item()
+            print(
+                f"[AE-MLP] Epoch {epoch:03d}  recon={total_recon / max(1, total_cnt):.4f}  z_var={z_var:.4f}"
+            )
+    else:
+        print("[AE-MLP] Skip AE pretraining (ae_epochs=0), encoder/decoder start from random init.")
 
     # ---- 初始化中心 c：用预训练好的 encoder 在全体样本上的 embedding 中位数 ----
     encoder.eval()
@@ -146,31 +164,44 @@ def main() -> None:
     # SVDD 阶段仅优化 encoder
     opt = torch.optim.Adam(encoder.parameters(), lr=cfg.ae_lr, weight_decay=cfg.ae_weight_decay)
 
-    # ---- 训练：最小化到中心的距离（纯 SVDD，无重构项）----
+    # ---- Phase 2: DASVDD 风格联合损失（重构 + γ * 距离）----
     for epoch in range(1, args.epochs + 1):
         perm = torch.randperm(N)
         X_shuf = X_dev[perm]
 
         encoder.train()
         total_svdd = 0.0
+        total_recon = 0.0
         total_cnt = 0
 
         for i in range(0, N, args.batch_size):
             xb = X_shuf[i : i + args.batch_size]
 
+            # 编码 + 解码
             z = encoder(xb)
-            # 截断 SVDD 损失：仅对距离中心最近的 80% 样本反向传播
+            x_hat = decoder(z)
+
+            # 1) SVDD 项：到中心的距离，可选截断（仅对前 80% 最近样本）
             dists = ((z - c.to(device)) ** 2).sum(dim=1)
             keep_ratio = 0.80
             k = max(1, int(xb.size(0) * keep_ratio))
             svdd_loss = dists.topk(k, largest=False).values.mean()
 
+            # 2) 重构项：MSE 重构误差，同样做 trimmed（前 80% 最小重构误差）
+            raw_recon = mse_loss_fn(x_hat, xb).mean(dim=1)
+            k_rec = max(1, int(xb.size(0) * keep_ratio))
+            recon_loss = raw_recon.topk(k_rec, largest=False).values.mean()
+
+            # 3) DASVDD 风格联合损失
+            total_loss = recon_loss + args.gamma * svdd_loss
+
             opt.zero_grad()
-            svdd_loss.backward()
+            total_loss.backward()
             clip_grad_norm_(encoder.parameters(), cfg.svdd_grad_clip)
             opt.step()
 
             total_svdd += svdd_loss.item() * xb.size(0)
+            total_recon += recon_loss.item() * xb.size(0)
             total_cnt += xb.size(0)
 
         # 监控：全量距离 + MAD 阈值 + TPR/FPR
@@ -208,6 +239,8 @@ def main() -> None:
         print(
             f"[SVDD-MLP] Epoch {epoch:03d}  "
             f"svdd={total_svdd/max(1,total_cnt):.4f}  "
+            f"recon={total_recon/max(1,total_cnt):.4f}  "
+            f"gamma={args.gamma:.3f}  "
             f"center_norm={center_norm:.4f}  "
             f"d_ben(mean/med)={d_ben_mean:.4f}/{d_ben_med:.4f}  "
             f"d_mal(mean/med)={d_mal_mean:.4f}/{d_mal_med:.4f}  "
