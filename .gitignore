@@ -33,6 +33,10 @@ __pycache__/
 *.swp
 *.swo
 
+# 实验目录（不纳入仓库）
+article2/examination/
+article2/实验对比算法/
+
 # 模型检查点（如果文件很大可以忽略）
 # *.pth
 # *.pt
