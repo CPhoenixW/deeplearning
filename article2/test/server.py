@@ -14,6 +14,7 @@ try:
     from .utils import (
         aggregate_updates_with_info,
         build_bn_matrix,
+        compute_multi_krum_scores,
         robust_scale_features,
         weighted_fedavg,
     )
@@ -21,7 +22,13 @@ except ImportError:
     from config import FedConfig
     from feature_buffer import BNReplayBuffer
     from models import AutoEncoder
-    from utils import aggregate_updates_with_info, build_bn_matrix, robust_scale_features, weighted_fedavg
+    from utils import (
+        aggregate_updates_with_info,
+        build_bn_matrix,
+        compute_multi_krum_scores,
+        robust_scale_features,
+        weighted_fedavg,
+    )
 
 
 @dataclass
@@ -130,6 +137,8 @@ class MultiKrumServer(BaseServer):
             if self.config.krum_num_byzantine is not None
             else max(0, self.config.num_clients - self.config.num_benign)
         )
+        krum_neighbors = k - num_byzantine - 2
+        krum_scores = compute_multi_krum_scores(client_state_dicts, num_byzantine=num_byzantine).detach().cpu()
         global_sd, m, alpha = aggregate_updates_with_info(
             client_state_dicts,
             method="multi_krum",
@@ -138,12 +147,13 @@ class MultiKrumServer(BaseServer):
         )
         self.global_model.load_state_dict(global_sd)
         selected_count = int(m.sum().item())
+        selected_m = selected_count
         return RoundStats(
             center_norm=float("nan"),
             z_var=0.0,
             ae_loss=float("nan"),
             svdd_loss=float("nan"),
-            d=torch.zeros(k),
+            d=krum_scores,
             m=m,
             alpha=alpha,
             phase="multi_krum Baseline",
@@ -151,6 +161,8 @@ class MultiKrumServer(BaseServer):
             monitor_items=[
                 ("Defense", "Multi-Krum"),
                 ("Byzantine f", str(int(num_byzantine))),
+                ("Score Neighbors", f"n-f-2 = {int(krum_neighbors)}"),
+                ("Selected m", str(int(selected_m))),
                 ("Clients Kept", f"{selected_count}/{k}"),
             ],
         )
@@ -175,7 +187,6 @@ class SVDDServer(BaseServer):
         self.buffer = BNReplayBuffer(capacity=config.buffer_capacity, d_bn=d_bn)
 
         self.c: Optional[Tensor] = None
-        self.credit: Optional[Tensor] = None
 
         self.optimizer_ae = torch.optim.Adam(
             self.ae.parameters(), lr=config.ae_lr, weight_decay=config.ae_weight_decay
@@ -316,24 +327,8 @@ class SVDDServer(BaseServer):
         if M.sum() < 1:
             M = torch.ones_like(M)
 
-        # Cross-round credit update
-        d_norm = (d - d.min()) / (d.max() - d.min() + 1e-8)
-        if self.credit is None:
-            self.credit = d_norm.detach().cpu()
-        else:
-            self.credit = (
-                self.config.center_ema_decay * self.credit
-                + (1.0 - self.config.center_ema_decay) * d_norm.detach().cpu()
-            )
-
-        credit = self.credit.to(self.device)
-
-        # Soft aggregation weights
-        p = min(1.0, svdd_round / float(self.config.svdd_warmup_rounds))
-        T_start, T_end = self.config.softweight_T_start, self.config.softweight_T_end
-        T = T_start - p * (T_start - T_end)
-        weights = torch.exp(-credit / T) * M
-        alpha = weights / (weights.sum() + 1e-12)
+        # Hard mask only: uniform FedAvg over kept clients (no credit / no soft weights).
+        alpha = M / (M.sum() + 1e-12)
 
         # Center EMA update using trusted clients
         trusted = M > 0.5
@@ -412,31 +407,18 @@ class SVDDServer(BaseServer):
                 ],
             )
 
-        if round_idx == phase1_rounds + 1 and self.c is None:
+        # Phase 2: ensure center is initialized, then immediately run SVDD filtering.
+        if self.c is None:
+            # Lazily initialize center using the first post-warmup batch of updates.
             center_norm, z_var = self.init_center(client_state_dicts)
-            k = len(client_state_dicts)
-            return RoundStats(
-                center_norm=center_norm,
-                z_var=z_var,
-                ae_loss=float("nan"),
-                svdd_loss=0.0,
-                d=torch.zeros(k),
-                m=torch.ones(k),
-                alpha=torch.full((k,), 1.0 / k),
-                phase="SVDD Filtering",
-                show_detection=True,
-                monitor_items=[
-                    ("Defense", "SVDD"),
-                    ("Center L2-Norm", f"{center_norm:.6f}"),
-                    ("Z-Space Variance", f"{z_var:.6f}"),
-                    ("SVDD Loss", f"{0.0:.6f}"),
-                ],
-            )
-
-        svdd_round = round_idx - phase1_rounds
+            svdd_round = 1
+        else:
+            svdd_round = round_idx - phase1_rounds
         center_norm, z_var, svdd_loss, _recon_loss, d, m, alpha = self.phase2_step(
             svdd_round, client_state_dicts
         )
+        k_tot = len(client_state_dicts)
+        kept = int(m.sum().item())
         return RoundStats(
             center_norm=center_norm,
             z_var=z_var,
@@ -448,7 +430,8 @@ class SVDDServer(BaseServer):
             phase="SVDD Filtering",
             show_detection=True,
             monitor_items=[
-                ("Defense", "SVDD"),
+                ("Defense", "SVDD (hard)"),
+                ("Kept clients", f"{kept}/{k_tot}"),
                 ("Center L2-Norm", f"{center_norm:.6f}"),
                 ("Z-Space Variance", f"{z_var:.6f}"),
                 ("SVDD Loss", f"{svdd_loss:.6f}"),

@@ -92,6 +92,71 @@ def resolve_defense_name(config: FedConfig, use_svdd: Optional[bool]) -> str:
     return "svdd" if use_svdd else config.aggregation_method
 
 
+def _default_lie_s(config: FedConfig, defense_name: str) -> int:
+    """Infer defense-specific s used in z_max formula when lie_s is not set."""
+    if defense_name == "multi_krum":
+        return int(
+            config.krum_num_byzantine
+            if config.krum_num_byzantine is not None
+            else max(0, config.num_clients - config.num_benign)
+        )
+    if defense_name == "trimmed_mean":
+        benign_n = max(1, config.num_benign)
+        return int(config.trimmed_mean_ratio * benign_n)
+    return 0
+
+
+def _apply_lie_attack(
+    config: FedConfig,
+    defense_name: str,
+    global_sd: Dict[str, Tensor],
+    client_sds: List[Dict[str, Tensor]],
+) -> None:
+    """Rewrite all malicious uploads using ALIE/LIE: delta = mu + z * sigma."""
+    if config.attack_type.lower().strip() != "lie_attack":
+        return
+
+    n = int(config.num_clients)
+    m = max(0, n - int(config.num_benign))
+    if m <= 0:
+        return
+
+    benign_n = max(1, n - m)
+    s = int(config.lie_s) if config.lie_s is not None else _default_lie_s(config, defense_name)
+    s = max(0, min(s, benign_n - 1))
+    ratio = float(benign_n - s) / float(benign_n)
+    ratio = min(max(ratio, 1e-6), 1.0 - 1e-6)
+    if config.lie_z_override is not None:
+        z = float(config.lie_z_override)
+    else:
+        z = float(torch.distributions.Normal(0.0, 1.0).icdf(torch.tensor(ratio)).item())
+
+    benign_updates = client_sds[: config.num_benign]
+    crafted_delta: Dict[str, Tensor] = {}
+    for k, g in global_sd.items():
+        g_cpu = g.detach().cpu()
+        if not g_cpu.is_floating_point():
+            continue
+        deltas = torch.stack(
+            [(sd[k].detach().cpu().float() - g_cpu.float()) for sd in benign_updates], dim=0
+        )
+        mu = deltas.mean(dim=0)
+        sigma = deltas.std(dim=0, unbiased=False)
+        crafted_delta[k] = mu + z * sigma
+
+    for cid in range(config.num_benign, n):
+        rewritten: Dict[str, Tensor] = {}
+        src = client_sds[cid]
+        for k, g in global_sd.items():
+            g_cpu = g.detach().cpu()
+            if g_cpu.is_floating_point():
+                out = g_cpu.float() + crafted_delta[k]
+                rewritten[k] = out.to(dtype=g_cpu.dtype).clone()
+            else:
+                rewritten[k] = src[k].detach().cpu().clone()
+        client_sds[cid] = rewritten
+
+
 def run_federated(
     config: FedConfig,
     use_svdd: Optional[bool] = None,
@@ -129,6 +194,7 @@ def run_federated(
         for c in clients:
             local_sd = c.local_step(global_sd)
             client_sds.append(local_sd)
+        _apply_lie_attack(config, defense_name, global_sd, client_sds)
 
         stats = server.aggregate(round_idx=r, client_state_dicts=client_sds)
         center_norm = stats.center_norm
@@ -161,7 +227,7 @@ def run_federated(
                 fpr = float((rejected[benign_mask]).float().mean().item())
             else:
                 fpr = 0.0
-            rr = float(rejected.float().mean().item())
+            reject_rate = float(rejected.float().mean().item())
 
             tp = ((rejected) & mal_mask).sum().item()
             fp = ((rejected) & benign_mask).sum().item()
@@ -169,7 +235,8 @@ def run_federated(
             fn = ((~rejected) & mal_mask).sum().item()
             total_clients = max(1, tp + fp + tn + fn)
             dar = float((tp + tn) / total_clients)
-            dpr = float(tp / max(1, tp + fp))
+            dpr = float(tp / max(1, tp + fp))  # Precision
+            rr = float(tp / max(1, tp + fn))   # Recall
 
         # Pretty monitor output
         monitor_items = [("Task", config.task_name)] + list(stats.monitor_items)
@@ -204,6 +271,7 @@ def run_federated(
                     "dar": float(dar),
                     "dpr": float(dpr),
                     "rr": float(rr),
+                    "reject_rate": float(reject_rate),
                 }
             )
 
@@ -274,6 +342,8 @@ def print_monitor_round(
 
         if phase.startswith("AE Warm-up"):
             print(f"| Loss (avg)             | {dist_ben:12.6f} | {dist_mal:12.6f} |")
+        elif phase.startswith("multi_krum"):
+            print(f"| Krum Score (avg)       | {dist_ben:12.6f} | {dist_mal:12.6f} |")
         else:
             print(f"| Dist (avg)             | {dist_ben:12.6f} | {dist_mal:12.6f} |")
         print(f"| Weight (avg)           | {w_ben:12.6f} | {w_mal:12.6f} |")
@@ -285,6 +355,8 @@ def print_monitor_round(
         print("+-------+----------+----------------+----------------+-------+")
         if phase.startswith("AE Warm-up"):
             col_name = "AE L1-Loss"
+        elif phase.startswith("multi_krum"):
+            col_name = "Krum Score"
         else:
             col_name = "Dist"
         print(f"|    ID | Type     | {col_name:>14} |          Alpha |     M |")
@@ -299,5 +371,6 @@ def print_monitor_round(
 
 if __name__ == "__main__":
     cfg = FedConfig()
-    cfg.aggregation_method = "fedavg"
-    run_federated(cfg, use_svdd=False)
+    # use_svdd=None 时只看 defense_type，不看 aggregation_method
+    cfg.defense_type = "multi_krum"
+    run_federated(cfg)

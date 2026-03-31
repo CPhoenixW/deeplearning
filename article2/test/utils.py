@@ -142,6 +142,37 @@ def _flatten_floating_params(state_dict: Dict[str, Tensor]) -> Tensor:
     return torch.cat(parts, dim=0)
 
 
+def compute_multi_krum_scores(
+    client_state_dicts: List[Dict[str, Tensor]],
+    num_byzantine: int,
+) -> Tensor:
+    """Compute per-client Multi-Krum scores.
+
+    score(i) = sum of squared distances to i's nearest (n - f - 2) neighbors.
+    """
+    n = len(client_state_dicts)
+    if n == 0:
+        raise ValueError("No client state_dicts provided.")
+    if num_byzantine < 0:
+        raise ValueError("num_byzantine must be >= 0.")
+    if n <= 2 * num_byzantine + 2:
+        raise ValueError("Multi-Krum requires n > 2 * num_byzantine + 2.")
+
+    updates = torch.stack([_flatten_floating_params(sd) for sd in client_state_dicts], dim=0)  # (n, d)
+    sq_norms = (updates * updates).sum(dim=1, keepdim=True)
+    distances = sq_norms + sq_norms.t() - 2.0 * (updates @ updates.t())
+    distances = distances.clamp_min(0.0)
+
+    neighbors = n - num_byzantine - 2
+    scores = torch.empty(n, dtype=distances.dtype)
+    for i in range(n):
+        d_i = distances[i]
+        others = torch.cat([d_i[:i], d_i[i + 1 :]], dim=0)
+        nearest, _ = torch.topk(others, k=neighbors, largest=False)
+        scores[i] = nearest.sum()
+    return scores
+
+
 def aggregate_multi_krum(
     client_state_dicts: List[Dict[str, Tensor]],
     num_byzantine: int,
@@ -161,22 +192,11 @@ def aggregate_multi_krum(
     if n <= 2 * num_byzantine + 2:
         raise ValueError("Multi-Krum requires n > 2 * num_byzantine + 2.")
 
-    updates = torch.stack([_flatten_floating_params(sd) for sd in client_state_dicts], dim=0)  # (n, d)
-    sq_norms = (updates * updates).sum(dim=1, keepdim=True)
-    distances = sq_norms + sq_norms.t() - 2.0 * (updates @ updates.t())
-    distances = distances.clamp_min(0.0)
-
+    scores = compute_multi_krum_scores(client_state_dicts, num_byzantine=num_byzantine)
     m = n - num_byzantine - 2
     if num_selected is None:
         num_selected = m
     num_selected = max(1, min(num_selected, n))
-
-    scores = torch.empty(n, dtype=distances.dtype)
-    for i in range(n):
-        d_i = distances[i]
-        others = torch.cat([d_i[:i], d_i[i + 1 :]], dim=0)
-        nearest, _ = torch.topk(others, k=m, largest=False)
-        scores[i] = nearest.sum()
 
     selected = torch.topk(scores, k=num_selected, largest=False).indices
     selected_sds = [client_state_dicts[int(idx)] for idx in selected.tolist()]
@@ -246,22 +266,11 @@ def aggregate_updates_with_info(
         if n <= 2 * num_byzantine + 2:
             raise ValueError("Multi-Krum requires n > 2 * num_byzantine + 2.")
 
-        updates = torch.stack([_flatten_floating_params(sd) for sd in client_state_dicts], dim=0)  # (n, d)
-        sq_norms = (updates * updates).sum(dim=1, keepdim=True)
-        distances = sq_norms + sq_norms.t() - 2.0 * (updates @ updates.t())
-        distances = distances.clamp_min(0.0)
-
+        scores = compute_multi_krum_scores(client_state_dicts, num_byzantine=num_byzantine)
         m = n - num_byzantine - 2
         if num_selected is None:
             num_selected = m
         num_selected = max(1, min(num_selected, n))
-
-        scores = torch.empty(n, dtype=distances.dtype)
-        for i in range(n):
-            d_i = distances[i]
-            others = torch.cat([d_i[:i], d_i[i + 1 :]], dim=0)
-            nearest, _ = torch.topk(others, k=m, largest=False)
-            scores[i] = nearest.sum()
 
         selected = torch.topk(scores, k=num_selected, largest=False).indices
         m_mask = torch.zeros(n)
