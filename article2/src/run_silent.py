@@ -11,7 +11,7 @@ from pathlib import Path
 
 from . import main as _main
 from .clients import ATTACK_REGISTRY
-from .config import FedConfig
+from .config import FedConfig, project_root
 from .run_matrix import apply_defense_to_config, run_one_combo
 from .server import DEFENSE_REGISTRY
 
@@ -62,7 +62,11 @@ if __name__ == "__main__":
     p.add_argument("--attacks", default="all")
     p.add_argument("--defenses", default="avg")
     p.add_argument("--rounds", type=int, default=50)
-    p.add_argument("--log-dir", default="log/sanity_50r")
+    p.add_argument(
+        "--log-dir",
+        default=str(project_root() / "log" / "sanity_50r"),
+        help="Output directory (default: <project>/log/sanity_50r).",
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--task", default="cifar10")
     p.add_argument("--device", choices=("auto", "cuda", "cpu"), default=None)

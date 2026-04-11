@@ -15,6 +15,7 @@ try:
         FedConfig,
         normalize_attack_name,
         normalize_defense_name,
+        project_root,
     )
     from .main import run_federated
     from .server import DEFENSE_REGISTRY
@@ -27,6 +28,7 @@ except ImportError:
         FedConfig,
         normalize_attack_name,
         normalize_defense_name,
+        project_root,
     )
     from main import run_federated
     from server import DEFENSE_REGISTRY
@@ -173,7 +175,12 @@ Examples (from project root, the directory containing ``src/``, ``data/``, ``log
     parser.add_argument("--task", type=str, default="cifar10")
     parser.add_argument("--attacks", type=str, default="all")
     parser.add_argument("--defenses", type=str, default="all")
-    parser.add_argument("--log-dir", type=str, default="../log", help="Output JSON directory.")
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default=str(project_root() / "log"),
+        help="Output JSON directory (default: <project>/log, not cwd-relative).",
+    )
     parser.add_argument("--data-root", type=str, default=None, help="FedConfig.data_root")
     parser.add_argument("--local-epochs", type=int, default=1, help="FedConfig.local_epochs")
     parser.add_argument("--num-workers", type=int, default=None, help="FedConfig.num_workers")

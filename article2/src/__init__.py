@@ -8,7 +8,10 @@ Layout (project root = parent of ``src/``)::
       data/         # datasets (CIFAR-10, Fashion-MNIST, AG News cache, …)
       log/          # experiment JSON outputs from ``run_matrix`` / ``run_silent``
 
-Run from project root::
+Default ``data_root`` / ``run_matrix --log-dir`` are resolved from the project
+root (parent of ``src/``), not from the process working directory.
+
+Typical invocation::
 
     python -m src.run_matrix --list
     python -m src.run_matrix --task ag_news --defenses svdd --rounds 50

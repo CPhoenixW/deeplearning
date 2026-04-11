@@ -1,11 +1,24 @@
 """Experiment hyperparameters.
 
-Assume the process current working directory is the project root (the directory
-that contains ``src/``, ``data/``, and ``log/``). Then ``data_root="data"`` and
-``run_matrix --log-dir log`` resolve to those folders.
+By default, ``data_root`` points at ``<project>/data`` where ``<project>`` is the
+directory that contains ``src/`` (resolved from this file), not the process cwd.
+Override with ``FedConfig.data_root`` or ``--data-root`` when needed.
 """
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def project_root() -> Path:
+    """``article2/`` root: parent of the ``src/`` package."""
+
+    return Path(__file__).resolve().parent.parent
+
+
+def _default_data_root() -> str:
+    return str(project_root() / "data")
 
 
 @dataclass
@@ -111,7 +124,7 @@ class FedConfig:
     # CIFAR-10: torchvision uses <data_root>/cifar-10-batches-py/ OR <data_root>/cifar10/cifar-10-batches-py/
     # (auto-detected). Fashion-MNIST uses <data_root>/fashion_mnist/FashionMNIST/.
     # AG News uses <data_root>/ag_news/hf_cache (HuggingFace datasets).
-    data_root: str = "./data"
+    data_root: str = field(default_factory=_default_data_root)
     # Strict non-IID partition (paper-style):
     # for each client k, sample class probabilities q^(k) ~ Dir(alpha * p),
     # where p is uniform prior over classes. Then assign a fixed number of
