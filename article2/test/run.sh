@@ -7,6 +7,6 @@ cd "$SCRIPT_DIR"
 # Usage:
 #   ./run.sh
 #   ./run.sh --rounds 50
-#   ./run.sh --attacks gaussian_noise,backdoor --defenses fedavg,multi_krum
+#   ./run.sh --attacks gn,bd --defenses avg,mk
 python3 "run_matrix.py" "$@"
 

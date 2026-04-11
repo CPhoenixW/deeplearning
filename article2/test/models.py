@@ -36,6 +36,93 @@ def build_resnet18(num_classes: int = 10) -> nn.Module:
     return resnet18_cifar10(num_classes=num_classes)
 
 
+class AGNewsClassifier(nn.Module):
+    """Tiny Transformer text classifier with BN compatibility head.
+
+    Transformer blocks mainly use LayerNorm. We keep a small BN head so the
+    existing BN-feature-based SVDD pipeline can still extract features.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 50000,
+        embed_dim: int = 128,
+        hidden_dim: int = 256,
+        num_classes: int = 4,
+        padding_idx: int = 0,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        ff_dim: int = 256,
+        max_len: int = 256,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim, padding_idx=padding_idx)
+        self.pos_embedding = nn.Embedding(max_len, embed_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.fc1 = nn.Linear(embed_dim, hidden_dim)
+        self.bn1 = nn.BatchNorm1d(hidden_dim)
+        self.act = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(p=dropout)
+        self.fc2 = nn.Linear(hidden_dim, num_classes)
+        self.max_len = int(max_len)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: (B, L) token ids, with PAD=0
+        bsz, seq_len = x.shape
+        pos = torch.arange(seq_len, device=x.device).unsqueeze(0).expand(bsz, seq_len)
+        pos = pos.clamp_max(self.max_len - 1)
+        emb = self.embedding(x) + self.pos_embedding(pos)  # (B, L, E)
+        pad_mask = x.eq(0)  # (B, L), True means masked
+        h_seq = self.encoder(emb, src_key_padding_mask=pad_mask)  # (B, L, E)
+
+        mask = (~pad_mask).unsqueeze(-1).float()  # (B, L, 1)
+        summed = (h_seq * mask).sum(dim=1)  # (B, E)
+        denom = mask.sum(dim=1).clamp_min(1.0)  # (B, 1)
+        pooled = summed / denom
+
+        h = self.fc1(pooled)
+        h = self.bn1(h)
+        h = self.act(h)
+        h = self.dropout(h)
+        return self.fc2(h)
+
+
+def ag_news_classifier(
+    vocab_size: int = 50000,
+    embed_dim: int = 128,
+    hidden_dim: int = 256,
+    num_classes: int = 4,
+    padding_idx: int = 0,
+    num_layers: int = 2,
+    num_heads: int = 4,
+    ff_dim: int = 256,
+    max_len: int = 256,
+    dropout: float = 0.1,
+) -> nn.Module:
+    return AGNewsClassifier(
+        vocab_size=vocab_size,
+        embed_dim=embed_dim,
+        hidden_dim=hidden_dim,
+        num_classes=num_classes,
+        padding_idx=padding_idx,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        ff_dim=ff_dim,
+        max_len=max_len,
+        dropout=dropout,
+    )
+
+
 class Encoder(nn.Module):
     """Shallow encoder over BN feature vectors.
 

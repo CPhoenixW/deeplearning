@@ -5,9 +5,10 @@ article2/test/data/
 article2/test/log/
 cifar-10-batches-py/
 */cifar-10-batches-py/
-
+article2/test/log_*/
 # 本地大权重（勿提交）
 article2/*.pth
+article2/*.zip
 
 # 虚拟环境
 dl/
@@ -36,6 +37,7 @@ __pycache__/
 # 实验目录（不纳入仓库）
 article2/examination/
 article2/实验对比算法/
+article2/experiment/
 
 # 模型检查点（如果文件很大可以忽略）
 # *.pth

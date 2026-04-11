@@ -95,20 +95,30 @@ class MaliciousClientBase(BenignClient):
 
 
 class GaussianNoiseClient(MaliciousClientBase):
-    """Attack client: adds Gaussian noise to global params and returns."""
+    """Gaussian attack: per-parameter-tensor draw from N(μ, (s·σ)²).
+
+    μ and σ are the empirical mean and std of that tensor in the *global* model.
+    Upload is μ + s * σ * ε with ε ~ N(0,1) i.i.d., so each layer keeps the same
+    first-order marginal scale as global weights but destroys parameter structure,
+    which is typically harder to flag than fixed global noise strength.
+    """
 
     def _postprocess_upload(
         self,
         global_state_dict: Dict[str, Tensor],
         local_state_dict: Dict[str, Tensor],
     ) -> Dict[str, Tensor]:
-        sigma = self.config.gaussian_sigma
+        scale = float(self.config.gaussian_sigma)
         noisy: Dict[str, Tensor] = {}
         for k, v in global_state_dict.items():
             t = v.detach().cpu()
             if t.is_floating_point():
-                noise = torch.randn_like(t) * sigma
-                noisy[k] = (t + noise).clone()
+                tf = t.float()
+                mu = tf.mean()
+                std = tf.std(unbiased=False).clamp_min(1e-8)
+                eps = torch.randn_like(tf)
+                out = mu + scale * std * eps
+                noisy[k] = out.to(dtype=t.dtype).clone()
             else:
                 noisy[k] = t.clone()
         return noisy
@@ -159,9 +169,14 @@ class BackdoorClient(MaliciousClientBase):
         if poison_ratio > 0.0 and s > 0:
             mask = torch.rand(y.shape[0], device=self.device) < poison_ratio
             if mask.any():
-                x_poison = x.clone()
                 y_poison = y.clone()
-                x_poison[mask, :, -s:, -s:] = val
+                # Image input: stamp a square trigger.
+                if x.ndim == 4:
+                    x_poison = x.clone()
+                    x_poison[mask, :, -s:, -s:] = val
+                else:
+                    # Text / tabular inputs: fall back to target-label poisoning only.
+                    x_poison = x
                 y_poison[mask] = target
                 return x_poison, y_poison
         return x, y
@@ -199,9 +214,10 @@ class LieAttackClient(MaliciousClientBase):
 
 
 ATTACK_REGISTRY: Dict[str, Type[BaseClient]] = {
-    "gaussian_noise": GaussianNoiseClient,
-    "label_flipping": LabelFlippingClient,
-    "sign_flipping": SignFlippingClient,
-    "backdoor": BackdoorClient,
+    "gn": GaussianNoiseClient,
+    "lf": LabelFlippingClient,
+    "sf": SignFlippingClient,
+    "bd": BackdoorClient,
+    "lie": LieAttackClient,
 }
 

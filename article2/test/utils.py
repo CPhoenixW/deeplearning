@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List
 
 import torch
 from torch import Tensor
@@ -29,10 +29,60 @@ def extract_bn_features(state_dict: Dict[str, Tensor]) -> Tensor:
     return torch.cat(feats, dim=0)
 
 
+def extract_transformer_encoder_layernorm_features(state_dict: Dict[str, Tensor]) -> Tensor:
+    """Flatten LayerNorm gamma/beta from ``nn.TransformerEncoder`` submodules (norm1/norm2 per layer)."""
+
+    keys: List[str] = []
+    for k in state_dict.keys():
+        if not (k.endswith("weight") or k.endswith("bias")):
+            continue
+        if "encoder.layers" not in k:
+            continue
+        if ".norm1." not in k and ".norm2." not in k:
+            continue
+        keys.append(k)
+    keys.sort()
+
+    feats: List[Tensor] = []
+    for k in keys:
+        v = state_dict[k].detach().float().view(-1)
+        feats.append(v)
+    if not feats:
+        raise ValueError("No TransformerEncoder LayerNorm params found in state_dict.")
+    return torch.cat(feats, dim=0)
+
+
+def extract_ag_news_svdd_features(state_dict: Dict[str, Tensor], mode: str) -> Tensor:
+    """SVDD feature vector for AG News text model (see ``FedConfig.ag_news_svdd_features``)."""
+
+    m = mode.lower().strip()
+    if m == "bn":
+        return extract_bn_features(state_dict)
+    if m == "ln":
+        return extract_transformer_encoder_layernorm_features(state_dict)
+    if m == "ln_bn":
+        ln = extract_transformer_encoder_layernorm_features(state_dict)
+        bn = extract_bn_features(state_dict)
+        return torch.cat([ln, bn], dim=0)
+    raise ValueError(
+        f"Unknown ag_news_svdd_features mode {mode!r}. Use 'bn', 'ln', or 'ln_bn'."
+    )
+
+
 def build_bn_matrix(client_state_dicts: Iterable[Dict[str, Tensor]]) -> Tensor:
     """Stack K clients' BN features into shape (K, D_bn)."""
 
     feat_list: List[Tensor] = [extract_bn_features(sd) for sd in client_state_dicts]
+    return torch.stack(feat_list, dim=0)
+
+
+def build_svdd_feature_matrix(
+    client_state_dicts: Iterable[Dict[str, Tensor]],
+    extract_fn: Callable[[Dict[str, Tensor]], Tensor],
+) -> Tensor:
+    """Stack per-client SVDD feature rows using a task-specific extractor."""
+
+    feat_list: List[Tensor] = [extract_fn(sd) for sd in client_state_dicts]
     return torch.stack(feat_list, dim=0)
 
 
@@ -99,17 +149,33 @@ def aggregate_fedavg(client_state_dicts: List[Dict[str, Tensor]]) -> Dict[str, T
 
 
 def aggregate_trimmed_mean(
-    client_state_dicts: List[Dict[str, Tensor]], trim_ratio: float = 0.2
+    client_state_dicts: List[Dict[str, Tensor]],
+    trim_ratio: float = 0.2,
+    num_byzantine: int | None = None,
 ) -> Dict[str, Tensor]:
-    """Coordinate-wise Trimmed Mean aggregation."""
+    """Coordinate-wise Trimmed Mean aggregation.
+
+    Paper-consistent mode:
+      remove the largest `b` and smallest `b` values per coordinate, where `b=num_byzantine`.
+    Backward-compatible mode:
+      when `num_byzantine is None`, use `trim_ratio` to infer trim count.
+    """
 
     if len(client_state_dicts) == 0:
         raise ValueError("No client state_dicts provided.")
-    if not (0.0 <= trim_ratio < 0.5):
-        raise ValueError("trim_ratio must be in [0.0, 0.5).")
-
     k = len(client_state_dicts)
-    trim_k = int(k * trim_ratio)
+    if num_byzantine is None:
+        if not (0.0 <= trim_ratio < 0.5):
+            raise ValueError("trim_ratio must be in [0.0, 0.5).")
+        trim_k = int(k * trim_ratio)
+    else:
+        if num_byzantine < 0:
+            raise ValueError("num_byzantine must be >= 0.")
+        if 2 * num_byzantine >= k:
+            raise ValueError(
+                f"Trimmed Mean requires 2*b < n. Got b={num_byzantine}, n={k}."
+            )
+        trim_k = int(num_byzantine)
 
     keys = client_state_dicts[0].keys()
     agg: Dict[str, Tensor] = {}
@@ -217,7 +283,11 @@ def aggregate_updates(
     if method_norm == "fedavg":
         return aggregate_fedavg(client_state_dicts)
     if method_norm == "trimmed_mean":
-        return aggregate_trimmed_mean(client_state_dicts, trim_ratio=trim_ratio)
+        return aggregate_trimmed_mean(
+            client_state_dicts,
+            trim_ratio=trim_ratio,
+            num_byzantine=num_byzantine if num_byzantine > 0 else None,
+        )
     if method_norm == "multi_krum":
         return aggregate_multi_krum(
             client_state_dicts,
@@ -258,7 +328,15 @@ def aggregate_updates_with_info(
     if method_norm == "trimmed_mean":
         # Coordinate-wise trimmed mean has no unique client-level reject mask.
         alpha = torch.full((n,), 1.0 / n)
-        return aggregate_trimmed_mean(client_state_dicts, trim_ratio=trim_ratio), torch.ones(n), alpha
+        return (
+            aggregate_trimmed_mean(
+                client_state_dicts,
+                trim_ratio=trim_ratio,
+                num_byzantine=num_byzantine if num_byzantine > 0 else None,
+            ),
+            torch.ones(n),
+            alpha,
+        )
 
     if method_norm == "multi_krum":
         if num_byzantine < 0:

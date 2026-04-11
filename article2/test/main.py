@@ -10,16 +10,14 @@ from torch.utils.data import DataLoader
 
 try:
     from .clients import ATTACK_REGISTRY, BaseClient, BenignClient
-    from .config import FedConfig
-    from .server import DEFENSE_REGISTRY, BaseServer
+    from .config import FedConfig, normalize_attack_name, normalize_defense_name
+    from .server import DEFENSE_REGISTRY, BaseServer, SVDDServer
     from .tasks import get_task
-    from .utils import extract_bn_features
 except ImportError:
     from clients import ATTACK_REGISTRY, BaseClient, BenignClient
-    from config import FedConfig
-    from server import DEFENSE_REGISTRY, BaseServer
+    from config import FedConfig, normalize_attack_name, normalize_defense_name
+    from server import DEFENSE_REGISTRY, BaseServer, SVDDServer
     from tasks import get_task
-    from utils import extract_bn_features
 
 
 def set_seed(seed: int) -> None:
@@ -49,6 +47,117 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -
             total += y.size(0)
     acc = correct / max(1, total)
     return acc, correct, total
+
+
+def _flatten_float_state_delta(
+    before_sd: Dict[str, Tensor],
+    after_sd: Dict[str, Tensor],
+) -> Tensor:
+    parts: List[Tensor] = []
+    for k, before in before_sd.items():
+        if not before.is_floating_point():
+            continue
+        after = after_sd[k]
+        parts.append((after.detach().cpu().float() - before.detach().cpu().float()).reshape(-1))
+    if not parts:
+        return torch.zeros(1, dtype=torch.float32)
+    return torch.cat(parts, dim=0)
+
+
+def _flatten_bn_buffer_delta(
+    before_sd: Dict[str, Tensor],
+    after_sd: Dict[str, Tensor],
+) -> Tensor:
+    """Flatten BN running-stat deltas for monitoring.
+
+    Tracks how much BatchNorm buffers actually change each round; this is
+    important for defenses that aggregate parameter deltas explicitly.
+    """
+    parts: List[Tensor] = []
+    for k, before in before_sd.items():
+        if not before.is_floating_point():
+            continue
+        if not (
+            ("bn" in k.lower() and k.endswith("running_mean"))
+            or ("bn" in k.lower() and k.endswith("running_var"))
+        ):
+            continue
+        after = after_sd[k]
+        parts.append((after.detach().cpu().float() - before.detach().cpu().float()).reshape(-1))
+    if not parts:
+        return torch.zeros(1, dtype=torch.float32)
+    return torch.cat(parts, dim=0)
+
+
+def _client_delta_norms(
+    global_sd: Dict[str, Tensor],
+    client_sds: List[Dict[str, Tensor]],
+) -> Tensor:
+    norms: List[Tensor] = []
+    for sd in client_sds:
+        d = _flatten_float_state_delta(global_sd, sd)
+        norms.append(d.norm(p=2))
+    if not norms:
+        return torch.zeros(0, dtype=torch.float32)
+    return torch.stack(norms).float()
+
+
+def _defense_specific_monitor_items(
+    defense_name: str,
+    *,
+    upd_l2: float,
+    upd_linf: float,
+    upd_mean_abs: float,
+    upd_nonzero_ratio: float,
+    bn_upd_l2: float,
+    bn_upd_linf: float,
+    bn_upd_mean_abs: float,
+    bn_upd_nonzero_ratio: float,
+    ben_norm_mean: float,
+    mal_norm_mean: float,
+    cos_ben: float,
+    cos_mal: float,
+) -> List[Tuple[str, str]]:
+    """Build concise, defense-aware monitor fields for per-round printing."""
+    dn = defense_name.lower().strip()
+    common_global = [
+        ("Actual Δglobal L2", f"{upd_l2:.6f}"),
+        ("Actual Δglobal L_inf", f"{upd_linf:.6f}"),
+        ("Actual Δglobal |mean|", f"{upd_mean_abs:.6f}"),
+        ("Actual Δglobal nonzero", f"{upd_nonzero_ratio:.3f}"),
+    ]
+
+    if dn == "lasa":
+        return common_global + [
+            ("Actual ΔBNbuf L2", f"{bn_upd_l2:.6f}"),
+            ("Actual ΔBNbuf L_inf", f"{bn_upd_linf:.6f}"),
+            ("Actual ΔBNbuf |mean|", f"{bn_upd_mean_abs:.6f}"),
+            ("Actual ΔBNbuf nonzero", f"{bn_upd_nonzero_ratio:.3f}"),
+            ("Client Δ L2 (ben avg)", f"{ben_norm_mean:.6f}"),
+            ("Client Δ L2 (mal avg)", f"{mal_norm_mean:.6f}"),
+            ("cos(Δg, meanΔ_ben)", f"{cos_ben:.4f}"),
+            ("cos(Δg, meanΔ_mal)", f"{cos_mal:.4f}"),
+        ]
+    if dn in ("svdd", "seca", "fld"):
+        return common_global + [
+            ("Client Δ L2 (ben avg)", f"{ben_norm_mean:.6f}"),
+            ("Client Δ L2 (mal avg)", f"{mal_norm_mean:.6f}"),
+            ("cos(Δg, meanΔ_ben)", f"{cos_ben:.4f}"),
+            ("cos(Δg, meanΔ_mal)", f"{cos_mal:.4f}"),
+        ]
+    if dn == "mk":
+        return common_global + [
+            ("Client Δ L2 (ben avg)", f"{ben_norm_mean:.6f}"),
+            ("Client Δ L2 (mal avg)", f"{mal_norm_mean:.6f}"),
+            ("cos(Δg, meanΔ_ben)", f"{cos_ben:.4f}"),
+        ]
+    if dn == "tm":
+        return common_global + [
+            ("Client Δ L2 (ben avg)", f"{ben_norm_mean:.6f}"),
+            ("Client Δ L2 (mal avg)", f"{mal_norm_mean:.6f}"),
+        ]
+    # fedavg / fallback
+    return common_global
 
 
 def build_clients(
@@ -94,15 +203,16 @@ def resolve_defense_name(config: FedConfig, use_svdd: Optional[bool]) -> str:
 
 def _default_lie_s(config: FedConfig, defense_name: str) -> int:
     """Infer defense-specific s used in z_max formula when lie_s is not set."""
-    if defense_name == "multi_krum":
+    if defense_name == "mk":
         return int(
             config.krum_num_byzantine
             if config.krum_num_byzantine is not None
             else max(0, config.num_clients - config.num_benign)
         )
-    if defense_name == "trimmed_mean":
-        benign_n = max(1, config.num_benign)
-        return int(config.trimmed_mean_ratio * benign_n)
+    if defense_name == "tm":
+        if config.trimmed_mean_num_byzantine is not None:
+            return int(config.trimmed_mean_num_byzantine)
+        return max(0, config.num_clients - config.num_benign)
     return 0
 
 
@@ -113,7 +223,7 @@ def _apply_lie_attack(
     client_sds: List[Dict[str, Tensor]],
 ) -> None:
     """Rewrite all malicious uploads using ALIE/LIE: delta = mu + z * sigma."""
-    if config.attack_type.lower().strip() != "lie_attack":
+    if config.attack_type != "lie":
         return
 
     n = int(config.num_clients)
@@ -165,6 +275,10 @@ def run_federated(
     set_seed(config.seed)
     device = resolve_device(config)
 
+    config.attack_type = normalize_attack_name(config.attack_type)
+    config.defense_type = normalize_defense_name(config.defense_type)
+    config.aggregation_method = normalize_defense_name(config.aggregation_method)
+
     task = get_task(config)
     config.num_classes = task.num_classes
 
@@ -172,7 +286,11 @@ def run_federated(
     clients, gt = build_clients(config, device, client_loaders, task)
 
     tmp_model = task.build_model()
-    d_bn = extract_bn_features(tmp_model.state_dict()).numel()
+
+    def _svdd_feat(sd: Dict[str, Tensor]) -> Tensor:
+        return task.extract_svdd_features(config, sd)
+
+    d_bn = _svdd_feat(tmp_model.state_dict()).numel()
 
     def model_fn():
         return task.build_model()
@@ -181,7 +299,16 @@ def run_federated(
     server_cls = DEFENSE_REGISTRY.get(defense_name)
     if server_cls is None:
         raise ValueError(f"Unknown defense_type: {defense_name}")
-    server: BaseServer = server_cls(config, d_bn=d_bn, device=device, model_fn=model_fn)
+    if defense_name == "svdd":
+        server: BaseServer = SVDDServer(
+            config,
+            d_bn=d_bn,
+            device=device,
+            model_fn=model_fn,
+            svdd_feature_extractor=_svdd_feat,
+        )
+    else:
+        server = server_cls(config, d_bn=d_bn, device=device, model_fn=model_fn)
 
     total_rounds = config.total_rounds
 
@@ -205,6 +332,49 @@ def run_federated(
         M = stats.m
         alpha_out = stats.alpha
         phase = stats.phase
+        new_global_sd = server.state_dict_for_clients()
+
+        # Actual global update diagnostics (what truly changed this round).
+        global_delta = _flatten_float_state_delta(global_sd, new_global_sd)
+        upd_l2 = float(global_delta.norm(p=2).item())
+        upd_linf = float(global_delta.abs().max().item())
+        upd_mean_abs = float(global_delta.abs().mean().item())
+        upd_nonzero_ratio = float((global_delta != 0).float().mean().item())
+        bn_delta = _flatten_bn_buffer_delta(global_sd, new_global_sd)
+        bn_upd_l2 = float(bn_delta.norm(p=2).item())
+        bn_upd_linf = float(bn_delta.abs().max().item())
+        bn_upd_mean_abs = float(bn_delta.abs().mean().item())
+        bn_upd_nonzero_ratio = float((bn_delta != 0).float().mean().item())
+
+        # Client-side delta magnitude statistics (before defense aggregation).
+        client_norms = _client_delta_norms(global_sd, client_sds)
+        benign_mask = gt == 1
+        mal_mask = gt == 0
+        ben_norm_mean = float(client_norms[benign_mask].mean().item()) if benign_mask.any() else 0.0
+        mal_norm_mean = float(client_norms[mal_mask].mean().item()) if mal_mask.any() else 0.0
+
+        # Direction alignment: is aggregated update closer to benign or malicious mean update?
+        cos_ben = 0.0
+        cos_mal = 0.0
+        with torch.no_grad():
+            if benign_mask.any():
+                ben_idx = torch.where(benign_mask)[0].tolist()
+                ben_deltas = torch.stack([_flatten_float_state_delta(global_sd, client_sds[i]) for i in ben_idx], dim=0)
+                ben_mean = ben_deltas.mean(dim=0)
+                cos_ben = float(
+                    torch.nn.functional.cosine_similarity(
+                        global_delta.unsqueeze(0), ben_mean.unsqueeze(0), dim=1
+                    ).item()
+                )
+            if mal_mask.any():
+                mal_idx = torch.where(mal_mask)[0].tolist()
+                mal_deltas = torch.stack([_flatten_float_state_delta(global_sd, client_sds[i]) for i in mal_idx], dim=0)
+                mal_mean = mal_deltas.mean(dim=0)
+                cos_mal = float(
+                    torch.nn.functional.cosine_similarity(
+                        global_delta.unsqueeze(0), mal_mean.unsqueeze(0), dim=1
+                    ).item()
+                )
 
         # Evaluation
         test_acc, correct, total = evaluate(server.global_model, test_loader, device)
@@ -215,8 +385,6 @@ def run_federated(
             print(f"[WARN] Encoder collapse detected at round {r}: var={z_var_scalar:.3e}")
 
         # Ground-truth based TPR / FPR
-        benign_mask = gt == 1
-        mal_mask = gt == 0
         with torch.no_grad():
             rejected = (M < 0.5)
             if mal_mask.any():
@@ -238,8 +406,22 @@ def run_federated(
             dpr = float(tp / max(1, tp + fp))  # Precision
             rr = float(tp / max(1, tp + fn))   # Recall
 
-        # Pretty monitor output
-        monitor_items = [("Task", config.task_name)] + list(stats.monitor_items)
+        # Pretty monitor output (defense-aware fields rather than one fixed block).
+        monitor_items = [("Task", config.task_name)] + list(stats.monitor_items) + _defense_specific_monitor_items(
+            defense_name,
+            upd_l2=upd_l2,
+            upd_linf=upd_linf,
+            upd_mean_abs=upd_mean_abs,
+            upd_nonzero_ratio=upd_nonzero_ratio,
+            bn_upd_l2=bn_upd_l2,
+            bn_upd_linf=bn_upd_linf,
+            bn_upd_mean_abs=bn_upd_mean_abs,
+            bn_upd_nonzero_ratio=bn_upd_nonzero_ratio,
+            ben_norm_mean=ben_norm_mean,
+            mal_norm_mean=mal_norm_mean,
+            cos_ben=cos_ben,
+            cos_mal=cos_mal,
+        )
         print_monitor_round(
             round_idx=r,
             phase=phase,
@@ -315,10 +497,31 @@ def print_monitor_round(
     if show_detection:
         # Detection / trimming summary
         print()
-        if phase.startswith("AE Warm-up"):
+        pl = phase.lower()
+        if "warm-up" in pl:
             title = "AE Trimmed Loss"
+            metric_name = "Loss (avg)"
+            show_metric = True
         else:
             title = "Detection (Phase 2)"
+            if pl.startswith("mk"):
+                metric_name = "Krum Score (avg)"
+                show_metric = True
+            elif pl.startswith("lasa"):
+                metric_name = "Benign-Layer Ratio"
+                show_metric = True
+            elif pl.startswith("seca"):
+                metric_name = "Concordance rho"
+                show_metric = True
+            elif pl.startswith("fld"):
+                metric_name = "Trust"
+                show_metric = True
+            elif pl.startswith("svdd"):
+                metric_name = "Dist (avg)"
+                show_metric = True
+            else:
+                metric_name = "Dist (avg)"
+                show_metric = False
         print("+------------------------+--------------+--------------+")
         print(f"| {title:<22} |       Benign |    Malicious |")
         print("+------------------------+--------------+--------------+")
@@ -340,12 +543,10 @@ def print_monitor_round(
         tpr_str = "-" if mal_mask.sum() == 0 else f"{tpr:.4f}"
         fpr_str = "-" if benign_mask.sum() == 0 else f"{fpr:.4f}"
 
-        if phase.startswith("AE Warm-up"):
-            print(f"| Loss (avg)             | {dist_ben:12.6f} | {dist_mal:12.6f} |")
-        elif phase.startswith("multi_krum"):
-            print(f"| Krum Score (avg)       | {dist_ben:12.6f} | {dist_mal:12.6f} |")
+        if show_metric:
+            print(f"| {metric_name:<22} | {dist_ben:12.6f} | {dist_mal:12.6f} |")
         else:
-            print(f"| Dist (avg)             | {dist_ben:12.6f} | {dist_mal:12.6f} |")
+            print(f"| {'Metric N/A':<22} | {'-':>12} | {'-':>12} |")
         print(f"| Weight (avg)           | {w_ben:12.6f} | {w_mal:12.6f} |")
         print(f"| TPR (mal. reject)      | {'-':>12} | {tpr_str:12} |")
         print(f"| FPR (ben. reject)      | {fpr_str:12} | {'-':>12} |")
@@ -353,18 +554,27 @@ def print_monitor_round(
 
         # Per-client table
         print("+-------+----------+----------------+----------------+-------+")
-        if phase.startswith("AE Warm-up"):
+        if "warm-up" in pl:
             col_name = "AE L1-Loss"
-        elif phase.startswith("multi_krum"):
+        elif pl.startswith("mk"):
             col_name = "Krum Score"
-        else:
+        elif pl.startswith("lasa"):
+            col_name = "Benign Ratio"
+        elif pl.startswith("seca"):
+            col_name = "Concordance"
+        elif pl.startswith("fld"):
+            col_name = "Trust"
+        elif pl.startswith("svdd"):
             col_name = "Dist"
+        else:
+            col_name = "Metric N/A"
         print(f"|    ID | Type     | {col_name:>14} |          Alpha |     M |")
         print("+-------+----------+----------------+----------------+-------+")
         for i in range(num_clients):
             ctype = "Benign" if gt[i].item() == 1 else "Mal"
+            metric_val = "-" if not show_metric else f"{d[i].item():14.6f}"
             print(
-                f"| {i:5d} | {ctype:<8} | {d[i].item():14.6f} | {alpha[i].item():14.6f} | {int(M[i].item() >= 0.5):5d} |"
+                f"| {i:5d} | {ctype:<8} | {metric_val:>14} | {alpha[i].item():14.6f} | {int(M[i].item() >= 0.5):5d} |"
             )
         print("+-------+----------+----------------+----------------+-------+")
 
@@ -372,5 +582,5 @@ def print_monitor_round(
 if __name__ == "__main__":
     cfg = FedConfig()
     # use_svdd=None 时只看 defense_type，不看 aggregation_method
-    cfg.defense_type = "multi_krum"
+    cfg.defense_type = "mk"
     run_federated(cfg)
