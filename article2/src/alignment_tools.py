@@ -9,17 +9,17 @@ logic from the local AE-SVDD framework to:
 1. 导出 Dirichlet 划分映射（alpha=5.0, seed=42, num_clients=50）。
 2. 导出 CIFAR-10 ResNet18 (no maxpool) 的初始权重，用于对齐外部代码库。
 
-用法示例（在 article2/test 目录下）:
+用法示例（在 article2 项目根目录下）:
 
   # 1) 生成 Dirichlet 映射 JSON
-  python alignment_tools.py \
+  python -m src.alignment_tools \
       --export-dirichlet-mapping \
-      --output ../experiment/dirichlet_cifar10_alpha5_seed42_K50.json
+      --output experiment/dirichlet_cifar10_alpha5_seed42_K50.json
 
   # 2) 导出 ResNet18 CIFAR-10 初始权重
-  python alignment_tools.py \
+  python -m src.alignment_tools \
       --export-resnet18-init \
-      --output ../experiment/resnet18_cifar10_init.pth
+      --output experiment/resnet18_cifar10_init.pth
 """
 
 import argparse
@@ -29,16 +29,16 @@ from typing import List
 
 import torch
 
-try:  # 优先相对导入（从 article2/test 内部调用）
+try:
     from .config import FedConfig
     from .models import resnet18_cifar10
-    from .tasks import _dataset_train_labels, _client_index_lists_dirichlet_strict
     from .tasks import Cifar10Task
-except ImportError:  # 允许作为普通脚本运行
+    from .tasks import _client_index_lists_dirichlet_strict, _dataset_train_labels
+except ImportError:  # 允许在 src/ 内直接 python alignment_tools.py
     from config import FedConfig
     from models import resnet18_cifar10
-    from tasks import _dataset_train_labels, _client_index_lists_dirichlet_strict
     from tasks import Cifar10Task
+    from tasks import _client_index_lists_dirichlet_strict, _dataset_train_labels
 
 from torchvision import datasets, transforms
 

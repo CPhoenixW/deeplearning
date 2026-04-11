@@ -1,3 +1,10 @@
+"""Experiment hyperparameters.
+
+Assume the process current working directory is the project root (the directory
+that contains ``src/``, ``data/``, and ``log/``). Then ``data_root="data"`` and
+``run_matrix --log-dir log`` resolve to those folders.
+"""
+
 from dataclasses import dataclass
 
 

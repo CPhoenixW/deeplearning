@@ -159,21 +159,21 @@ def main() -> None:
         description="Run federated experiments; options align with main.run_federated + FedConfig.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  python run_matrix.py --list
-  python run_matrix.py --task cifar10 --attacks bd --defenses mk --rounds 50
-  python run_matrix.py --task fashion_mnist --attacks gn --defenses avg
-  python run_matrix.py --task all --attacks all --defenses svdd,avg
+Examples (from project root, the directory containing ``src/``, ``data/``, ``log/``):
+  python -m src.run_matrix --list
+  python -m src.run_matrix --task cifar10 --attacks bd --defenses mk --rounds 50
+  python -m src.run_matrix --task fashion_mnist --attacks gn --defenses avg
+  python -m src.run_matrix --task all --attacks all --defenses svdd,avg
 """.strip(),
     )
     parser.add_argument("--list", action="store_true", help="Print valid task / attack / defense keys and exit.")
-    parser.add_argument("--rounds", type=int, default=None, help="FedConfig.total_rounds")
+    parser.add_argument("--rounds", type=int, default=300, help="FedConfig.total_rounds")
     parser.add_argument("--num-clients", type=int, default=50, help="FedConfig.num_clients")
     parser.add_argument("--num-benign", type=int, default=35, help="FedConfig.num_benign")
     parser.add_argument("--task", type=str, default="cifar10")
     parser.add_argument("--attacks", type=str, default="all")
-    parser.add_argument("--defenses", type=str, default="svdd,avg,tm,mk")
-    parser.add_argument("--log-dir", type=str, default="log", help="Output JSON directory.")
+    parser.add_argument("--defenses", type=str, default="all")
+    parser.add_argument("--log-dir", type=str, default="../log", help="Output JSON directory.")
     parser.add_argument("--data-root", type=str, default=None, help="FedConfig.data_root")
     parser.add_argument("--local-epochs", type=int, default=1, help="FedConfig.local_epochs")
     parser.add_argument("--num-workers", type=int, default=None, help="FedConfig.num_workers")

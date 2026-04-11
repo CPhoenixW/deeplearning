@@ -1,14 +1,23 @@
-# 数据集
-data/
-*/data/
-article2/test/data/
-article2/test/log/
-cifar-10-batches-py/
-*/cifar-10-batches-py/
-article2/test/log_*/
-# 本地大权重（勿提交）
+# 数据集与缓存
+article2/data/
+article2/src/data/
+**/hf_cache/
+
+
+# 日志与训练输出
+article2/log/
+
+
+# 本地大权重与压缩包（勿提交）
 article2/*.pth
+article2/*.pt
+article2/*.ckpt
+article2/*.safetensors
 article2/*.zip
+# 全局忽略大检查点时可取消下行注释
+# *.pth
+# *.pt
+# *.ckpt
 
 # 虚拟环境
 dl/
@@ -18,28 +27,59 @@ venv/
 .venv/
 */.venv/
 
-# Python 缓存
+# Python 缓存与构建产物
 __pycache__/
 */__pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
 
-# 日志文件（可选，如需保留可注释掉）
-# logs/
-# */logs/
+# 测试与类型检查
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
 
-# IDE 配置
+# Jupyter
+.ipynb_checkpoints/
+
+# 实验跟踪（本地运行生成）
+wandb/
+mlruns/
+runs/
+*.tfevents.*
+
+# 环境变量（勿提交密钥；示例文件可命名为 .env.example 并纳入版本库）
+.env
+.env.local
+.env.*.local
+
+# IDE / 编辑器
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# AI 助手本地状态
+.claude/
+**/.claude/
 
 # 实验目录（不纳入仓库）
 article2/examination/
 article2/实验对比算法/
 article2/experiment/
-
-# 模型检查点（如果文件很大可以忽略）
-# *.pth
-# *.pt
-# *.ckpt
