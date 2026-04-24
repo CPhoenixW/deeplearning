@@ -171,7 +171,7 @@ Examples (from project root, the directory containing ``src/``, ``data/``, ``log
     parser.add_argument("--list", action="store_true", help="Print valid task / attack / defense keys and exit.")
     parser.add_argument("--rounds", type=int, default=300, help="FedConfig.total_rounds")
     parser.add_argument("--num-clients", type=int, default=50, help="FedConfig.num_clients")
-    parser.add_argument("--num-benign", type=int, default=35, help="FedConfig.num_benign")
+    parser.add_argument("--num-benign", type=int, default=30, help="FedConfig.num_benign")
     parser.add_argument("--task", type=str, default="cifar10")
     parser.add_argument("--attacks", type=str, default="all")
     parser.add_argument("--defenses", type=str, default="all")

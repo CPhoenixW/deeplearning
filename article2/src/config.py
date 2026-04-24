@@ -77,7 +77,7 @@ class FedConfig:
     ae_grad_clip: float = 1.0
 
     # --- Phase schedule ---
-    phase1_rounds: int = 5
+    phase1_rounds: int = 15
     # AE warm-up: in robust-scaled BN space, keep clients closest to the coordinate-wise
     # median; only they contribute to the AE backward step and this round's FedAvg.
     ae_warmup_keep_ratio: float = 0.8
@@ -132,7 +132,7 @@ class FedConfig:
     # - None: IID split
     # - smaller alpha: stronger heterogeneity
     # - larger alpha: closer to IID
-    dirichlet_alpha: float | None = 5.0
+    dirichlet_alpha: float | None = 1
     # Backward-compatible alias (deprecated). If dirichlet_alpha is None and
     # this field is set, tasks.py will use this value.
     dirichlet_noniid_beta: float | None = None

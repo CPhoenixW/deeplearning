@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Type
 

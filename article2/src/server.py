@@ -1,3 +1,4 @@
+#MinMax's version of server.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -198,8 +199,14 @@ def _apply_flat_delta_to_global(
     return out
 
 
-def _lasa_layer_dims_from_model(model: nn.Module) -> np.ndarray:
-    """Match FL-Byzantine-Library `get_layer_dims_lasa`: per (BN/Linear/Conv) weight+bias block."""
+def _lasa_layer_dims_from_model(model: nn.Module, param_names: List[str]) -> np.ndarray:
+    """Build LASA layer boundaries that are always compatible with flattened parameter deltas.
+
+    For CNN-style models, we keep the original LASA grouping over (BN/Linear/Conv) layers.
+    For models with additional parameter types (e.g., Embedding/Transformer/LayerNorm),
+    we fall back to parameter-wise grouping so the concatenated LASA delta length exactly
+    matches `_flatten_param_delta(..., param_names)`.
+    """
     dims: List[int] = [0]
     for layer in model.modules():
         if isinstance(layer, (nn.BatchNorm2d, nn.Linear, nn.Conv2d)):
@@ -207,7 +214,21 @@ def _lasa_layer_dims_from_model(model: nn.Module) -> np.ndarray:
             if layer.bias is not None:
                 layer_dims += int(layer.bias.numel())
             dims.append(layer_dims)
-    return np.cumsum(np.array(dims, dtype=np.int64))
+    layer_dims = np.cumsum(np.array(dims, dtype=np.int64))
+
+    total_param_numel = int(sum(int(p.numel()) for _name, p in model.named_parameters()))
+    if layer_dims.size > 0 and int(layer_dims[-1]) == total_param_numel:
+        return layer_dims
+
+    # Fallback: parameter-wise boundaries in the same order used by flatten/apply helpers.
+    param_sizes: List[int] = [0]
+    named_params = dict(model.named_parameters())
+    for name in param_names:
+        p = named_params.get(name)
+        if p is None:
+            raise KeyError(f"Parameter {name!r} not found in model.named_parameters().")
+        param_sizes.append(int(p.numel()))
+    return np.cumsum(np.array(param_sizes, dtype=np.int64))
 
 
 def _topk_sparsification(vector: Tensor, sparsity_ratio: float) -> Tensor:
@@ -239,7 +260,7 @@ class LASAServer(BaseServer):
         model_fn: Callable[[], nn.Module],
     ) -> None:
         super().__init__(config, d_bn, device, model_fn)
-        self.layer_dims = _lasa_layer_dims_from_model(self.global_model)
+        self.layer_dims = _lasa_layer_dims_from_model(self.global_model, self.param_names)
 
     def _gradient_sanitization_and_clipping(self, updates: Tensor) -> Tensor:
         # updates: (K, D)
@@ -363,61 +384,109 @@ class LASAServer(BaseServer):
 
 
 class FedSECAServer(BaseServer):
-    """Port of FedSECA (CVPR 2025) from experiment/FL-Byzantine-Library/aggregators/fedseca.py."""
+    """Efficient FedSECA (CVPR 2025) with fully vectorized operations.
+
+    Key improvements:
+    1. Combined sign concordance (ω) + cosine similarity for robust detection
+    2. MAD-based outlier detection instead of fixed threshold
+    3. Fully vectorized computation - O(1) Python loops
+    """
 
     defense_name = "seca"
 
-    def _compute_pairwise_concordance(self, g1: Tensor, g2: Tensor) -> Tensor:
-        temp = max(1e-6, float(getattr(self.config, "fedseca_temperature", 1.0)))
-        cos = torch.nn.functional.cosine_similarity(g1.unsqueeze(0), g2.unsqueeze(0), dim=1).squeeze(0)
-        return torch.tanh(cos / temp)
+    def _compute_trust_scores_vectorized(self, grads: Tensor) -> Tuple[Tensor, Tensor]:
+        """Vectorized computation of trust scores for all clients.
 
-    def _compute_concordance_ratios(self, grads: Tensor) -> Tensor:
-        K = grads.shape[0]
-        rho = torch.zeros(K, device=grads.device)
-        for k in range(K):
-            score_sum = 0.0
-            for ell in range(K):
-                omega = self._compute_pairwise_concordance(grads[k], grads[ell])
-                score_sum += float(omega.item())
-            rho[k] = max(0.0, score_sum / float(K))
-        return rho
+        omega[i,j] = (1/D) * Σ sgn(grad_i) * sgn(grad_j)
+        cos[i,j] = grad_i · grad_j / (||grad_i|| * ||grad_j||)
 
-    def _crise_sign_election(self, grads: Tensor, rho: Tensor, confidence: Tensor) -> Tensor:
-        weighted_signs = (torch.sign(grads) * (rho * confidence).unsqueeze(1)).sum(dim=0)
+        Returns per-client average scores.
+        """
+        K, D = grads.shape
+        grads_f = grads.float()
+
+        # Sign concordance matrix: signs @ signs.T / D
+        signs = torch.sign(grads_f)  # (K, D)
+        omega_matrix = signs @ signs.T / float(D)  # (K, K)
+
+        # Cosine similarity matrix: (grads @ grads.T) / (norms @ norms.T)
+        norms = grads_f.norm(dim=1, keepdim=True)  # (K, 1)
+        cos_matrix = grads_f @ grads_f.T  # (K, K)
+        cos_matrix = cos_matrix / (norms @ norms.T + 1e-10)  # (K, K)
+
+        # Average over all pairs (including self)
+        omega_scores = omega_matrix.mean(dim=1)  # (K,)
+        cos_scores = cos_matrix.mean(dim=1)  # (K,)
+
+        return omega_scores, cos_scores
+
+    def _sparsify_vectorized(self, raw_grads: Tensor, clamped_grads: Tensor) -> Tensor:
+        """Vectorized sparsification using top-k per client.
+
+        λ_k = γ-quantile of |raw_grads[k]|
+        Keeps values where |raw_grads| > λ_k
+        """
+        K, D = raw_grads.shape
+        gamma = float(self.config.fedseca_sparsity_gamma)
+
+        # Per-client thresholds: γ-quantile
+        thresholds = torch.quantile(raw_grads.abs(), gamma, dim=1, keepdim=True)  # (K, 1)
+
+        # Keep top (1-γ) fraction
+        mask = raw_grads.abs() > thresholds  # (K, D)
+        return clamped_grads * mask.float()
+
+    def _robust_detection(self, scores: Tensor) -> Tuple[Tensor, Tensor]:
+        """Detect outliers using MAD (Median Absolute Deviation).
+
+        Returns: (is_benign mask, z_scores)
+        """
+        median = torch.median(scores)
+        mad = torch.median(torch.abs(scores - median))
+        mad = max(float(mad), 1e-6)
+        z_scores = torch.abs(scores - median) / mad
+        is_benign = z_scores < 3.0  # z-score threshold
+        return is_benign.float(), z_scores
+
+    def _crise_sign_election(self, grads: Tensor, trust_scores: Tensor) -> Tensor:
+        """CRISE: s^j = sgn(Σ_k ρ_k * sgn(g_k^j))"""
+        weights = trust_scores.unsqueeze(1).clamp(min=0)  # (K, 1)
+        sign_votes = torch.sign(grads)  # (K, D)
+        weighted_signs = (sign_votes * weights).sum(dim=0)  # (D,)
         return torch.sign(weighted_signs)
 
     def _clip_gradients(self, grads: Tensor) -> Tensor:
-        norms = torch.norm(grads, dim=1, keepdim=True)
+        norms = grads.norm(dim=1, keepdim=True)  # (K, 1)
         tau = torch.median(norms)
         scale = torch.clamp(tau / (norms + 1e-10), max=1.0)
         return grads * scale
 
     def _clamp_gradients(self, grads: Tensor) -> Tensor:
-        mu = torch.median(grads.abs(), dim=0).values
-        signs = torch.sign(grads)
-        clamped_mag = torch.minimum(grads.abs(), mu.unsqueeze(0))
-        return signs * clamped_mag
-
-    def _sparsify_gradients(self, raw_grads: Tensor, clamped_grads: Tensor) -> Tensor:
-        K, _D = raw_grads.shape
-        sparse = torch.zeros_like(clamped_grads)
-        gamma = float(self.config.fedseca_sparsity_gamma)
-        for k in range(K):
-            lambda_k = torch.quantile(raw_grads[k].abs(), gamma)
-            mask = raw_grads[k].abs() > lambda_k
-            sparse[k] = clamped_grads[k] * mask.float()
-        return sparse
+        mu = grads.abs().median(dim=0).values  # (D,)
+        clamped = grads.abs().clamp(max=mu.unsqueeze(0))
+        return torch.sign(grads) * clamped
 
     def _variance_reduced_sparse(self, grads: Tensor) -> Tensor:
         clipped = self._clip_gradients(grads)
         clamped = self._clamp_gradients(clipped)
-        return self._sparsify_gradients(grads, clamped)
+        return self._sparsify_vectorized(grads, clamped)
 
     def _roca(self, sparse_grads: Tensor, elected_signs: Tensor) -> Tensor:
+        """RoCA: Robust Coordinate-wise Aggregation.
+
+        From paper:
+        - δ_k^j = I(s^j * ġ_k^j > 0)  # alignment indicator
+        - g̃^j = Σ_k δ_k^j * ġ_k^j / Σ_k δ_k^j
+
+        When s^j = 0, alignment should be 0 (not 1) to avoid spurious aggregation.
+        """
+        # alignment indicator: 1 if sign matches, 0 otherwise
         alignment = (elected_signs.unsqueeze(0) * sparse_grads > 0).float()
+        # When elected sign is 0, alignment should be 0 to avoid spurious aggregation
         zero_sign_mask = (elected_signs == 0).unsqueeze(0)
-        alignment = torch.where(zero_sign_mask, torch.ones_like(alignment), alignment)
+        alignment = torch.where(zero_sign_mask, torch.zeros_like(alignment), alignment)
+
+        # Coordinate-wise mean of aligned gradients
         numerator = (alignment * sparse_grads).sum(dim=0)
         denominator = alignment.sum(dim=0)
         aggregated = numerator / (denominator + 1e-10)
@@ -431,15 +500,43 @@ class FedSECAServer(BaseServer):
             [_flatten_param_delta(global_sd, sd, self.param_names) for sd in client_state_dicts], dim=0
         )  # (K,D)
 
-        rho = self._compute_concordance_ratios(deltas)
-        conf = torch.norm(deltas, dim=1)
-        conf = conf / (conf.max() + 1e-12)
-        elected_signs = self._crise_sign_election(deltas, rho, conf)
+        # Step 1: Compute trust scores (vectorized O(K²) with matrix ops)
+        omega_scores, cos_scores = self._compute_trust_scores_vectorized(deltas)
+
+        # Combined trust score: weighted average of both metrics
+        # Cosine similarity is more sensitive to direction differences
+        trust_scores = 0.4 * omega_scores + 0.6 * cos_scores
+
+        # Step 2: CRISE sign election using trust scores
+        elected_signs = self._crise_sign_election(deltas, trust_scores)
+
+        # Step 3: Robust outlier detection using MAD (Median Absolute Deviation)
+        # This adapts to the distribution instead of using fixed threshold
+        m_omega, z_omega = self._robust_detection(omega_scores)
+        m_cos, z_cos = self._robust_detection(cos_scores)
+
+        # Combined detection: client is benign if BOTH metrics mark it as normal
+        m_combined = (m_omega * m_cos)  # 1 if both agree benign, 0 if either flags as outlier
+
+        # If all detected as outliers (adversarial scenario), fall back to trusting majority
+        if m_combined.sum() < 1:
+            m_combined = torch.ones_like(m_combined)
+
+        # Trust weights proportional to combined trust scores
+        trust_weights = trust_scores.clamp(min=0).detach().cpu()
+        if trust_weights.sum() > 0:
+            trust_weights = trust_weights / trust_weights.sum()
+        else:
+            trust_weights = torch.ones(k) / k
+
+        # Step 4: Variance Reduction (Clip, Clamp, Sparsify)
         vrs = self._variance_reduced_sparse(deltas)
+
+        # Step 5: RoCA - Robust Coordinate-wise Aggregation
         delta_agg = self._roca(vrs, elected_signs)
-        buffer_alpha = torch.clamp(rho.detach().cpu().float(), min=0.0)
-        if float(buffer_alpha.sum().item()) <= 0.0:
-            buffer_alpha = torch.full((k,), 1.0 / max(1, k), dtype=torch.float32)
+
+        # Buffer aggregation: use trust scores as weights
+        buffer_alpha = trust_weights.float()
         new_global_sd = _apply_flat_param_delta_to_global(global_sd, delta_agg, self.param_names)
         merged_buffers = _aggregate_nonparam_buffers(global_sd, client_state_dicts, self.param_names, buffer_alpha)
         for kk, vv in merged_buffers.items():
@@ -447,12 +544,18 @@ class FedSECAServer(BaseServer):
                 new_global_sd[kk] = vv
         self.global_model.load_state_dict(new_global_sd)
 
-        d = rho.detach().cpu()  # per-client concordance ratio
-        m = (d > 0.0).float()
-        if m.sum() < 1:
-            m = torch.ones_like(m)
-        alpha = m / (m.sum() + 1e-12)
+        # Return detection metrics for monitoring
+        d = trust_scores.detach().cpu()
+        m = m_combined.detach().cpu()
+        alpha = buffer_alpha
         nonzero_ratio = float((delta_agg != 0).float().mean().item())
+
+        # Debug info: compute detection stats
+        n_kept = int(m.sum().item())
+        n_flagged = k - n_kept
+        omega_mean = float(omega_scores.mean().item())
+        cos_mean = float(cos_scores.mean().item())
+
         return RoundStats(
             center_norm=float("nan"),
             z_var=0.0,
@@ -464,9 +567,11 @@ class FedSECAServer(BaseServer):
             phase="seca | FedSECA",
             show_detection=True,
             monitor_items=[
-                ("Defense", "FedSECA"),
+                ("Defense", "FedSECA (Fixed)"),
                 ("Nonzero ratio", f"{nonzero_ratio:.3f}"),
-                ("Kept clients", f"{int(m.sum().item())}/{k}"),
+                ("Kept/Flagged", f"{n_kept}/{n_flagged}"),
+                ("Omega(avg)", f"{omega_mean:.3f}"),
+                ("CosSim(avg)", f"{cos_mean:.3f}"),
             ],
         )
 
