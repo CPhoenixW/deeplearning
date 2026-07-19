@@ -138,7 +138,7 @@ def _defense_specific_monitor_items(
             ("cos(Δg, meanΔ_ben)", f"{cos_ben:.4f}"),
             ("cos(Δg, meanΔ_mal)", f"{cos_mal:.4f}"),
         ]
-    if dn in ("svdd", "seca", "fld"):
+    if dn in ("svdd", "seca", "fld", "alignins", "bnguard"):
         return common_global + [
             ("Client Δ L2 (ben avg)", f"{ben_norm_mean:.6f}"),
             ("Client Δ L2 (mal avg)", f"{mal_norm_mean:.6f}"),

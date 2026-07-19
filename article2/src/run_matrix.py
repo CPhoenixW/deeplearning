@@ -13,6 +13,7 @@ try:
         ATTACK_ALIASES,
         DEFENSE_ALIASES,
         FedConfig,
+        load_matrix_run_config,
         normalize_attack_name,
         normalize_defense_name,
         project_root,
@@ -26,6 +27,7 @@ except ImportError:
         ATTACK_ALIASES,
         DEFENSE_ALIASES,
         FedConfig,
+        load_matrix_run_config,
         normalize_attack_name,
         normalize_defense_name,
         project_root,
@@ -158,76 +160,52 @@ def print_list_options() -> None:
 def main() -> None:
     default_cfg = FedConfig()
     parser = argparse.ArgumentParser(
-        description="Run federated experiments; options align with main.run_federated + FedConfig.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples (from project root, the directory containing ``src/``, ``data/``, ``log/``):
-  python -m src.run_matrix --list
-  python -m src.run_matrix --task cifar10 --attacks bd --defenses mk --rounds 50
-  python -m src.run_matrix --task fashion_mnist --attacks gn --defenses avg
-  python -m src.run_matrix --task all --attacks all --defenses svdd,avg
-""".strip(),
+        description="按 ``config.MatrixRunConfig`` / ``load_matrix_run_config`` 跑任务×攻击×防御矩阵。",
     )
-    parser.add_argument("--list", action="store_true", help="Print valid task / attack / defense keys and exit.")
-    parser.add_argument("--rounds", type=int, default=300, help="FedConfig.total_rounds")
-    parser.add_argument("--num-clients", type=int, default=50, help="FedConfig.num_clients")
-    parser.add_argument("--num-benign", type=int, default=30, help="FedConfig.num_benign")
-    parser.add_argument("--task", type=str, default="cifar10")
-    parser.add_argument("--attacks", type=str, default="all")
-    parser.add_argument("--defenses", type=str, default="all")
+    parser.add_argument("--list", action="store_true", help="列出合法 task / attack / defense 键后退出。")
     parser.add_argument(
-        "--log-dir",
+        "--config",
         type=str,
-        default=str(project_root() / "log"),
-        help="Output JSON directory (default: <project>/log, not cwd-relative).",
+        default=None,
+        help="JSON 文件，键为 MatrixRunConfig 字段，用于覆盖 ``config.DEFAULT_MATRIX_RUN``。",
     )
-    parser.add_argument("--data-root", type=str, default=None, help="FedConfig.data_root")
-    parser.add_argument("--local-epochs", type=int, default=1, help="FedConfig.local_epochs")
-    parser.add_argument("--num-workers", type=int, default=None, help="FedConfig.num_workers")
-    parser.add_argument("--dirichlet-alpha", type=float, default=None, help="FedConfig.dirichlet_alpha")
-    parser.add_argument("--seed", type=int, default=42, help="FedConfig.seed")
-    parser.add_argument("--device", type=str, default="cuda", choices=("auto", "cuda", "cpu"), help="FedConfig.device")
-    parser.add_argument("--trimmed-mean-num-byzantine", type=int, default=None)
     args = parser.parse_args()
 
     if args.list:
         print_list_options()
         sys.exit(0)
 
-    task_names = parse_tasks_arg(args.task, default_cfg.task_name)
+    mr = load_matrix_run_config(args.config)
 
-    if args.attacks.strip().lower() == "all":
+    task_names = parse_tasks_arg(mr.task, default_cfg.task_name)
+
+    if mr.attacks.strip().lower() == "all":
         attacks = sorted(ATTACK_REGISTRY.keys())
     else:
-        attacks = [normalize_attack_name(x) for x in parse_list_arg(args.attacks)]
+        attacks = [normalize_attack_name(x) for x in parse_list_arg(mr.attacks)]
 
-    defenses = [normalize_defense_name(x) for x in parse_list_arg(args.defenses)]
+    defenses = [normalize_defense_name(x) for x in parse_list_arg(mr.defenses)]
     validate_lists(task_names, attacks, defenses)
 
-    output_dir = Path(args.log_dir)
+    log_dir = mr.log_dir if mr.log_dir is not None else str(project_root() / "log")
+    output_dir = Path(log_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = FedConfig()
-    if args.rounds is not None:
-        cfg.total_rounds = args.rounds
-    if args.num_clients is not None:
-        cfg.num_clients = args.num_clients
-    if args.num_benign is not None:
-        cfg.num_benign = args.num_benign
-    if args.data_root is not None:
-        cfg.data_root = args.data_root
-    if args.local_epochs is not None:
-        cfg.local_epochs = int(args.local_epochs)
-    if args.num_workers is not None:
-        cfg.num_workers = int(args.num_workers)
-    if args.dirichlet_alpha is not None:
-        cfg.dirichlet_alpha = None if args.dirichlet_alpha < 0 else float(args.dirichlet_alpha)
-    if args.seed is not None:
-        cfg.seed = args.seed
-    if args.device is not None:
-        cfg.device = args.device
-    if args.trimmed_mean_num_byzantine is not None:
-        cfg.trimmed_mean_num_byzantine = args.trimmed_mean_num_byzantine
+    cfg.total_rounds = mr.total_rounds
+    cfg.num_clients = mr.num_clients
+    cfg.num_benign = mr.num_benign
+    if mr.data_root is not None:
+        cfg.data_root = mr.data_root
+    cfg.local_epochs = int(mr.local_epochs)
+    if mr.num_workers is not None:
+        cfg.num_workers = int(mr.num_workers)
+    if mr.dirichlet_alpha is not None:
+        cfg.dirichlet_alpha = None if mr.dirichlet_alpha < 0 else float(mr.dirichlet_alpha)
+    cfg.seed = mr.seed
+    cfg.device = mr.device
+    if mr.trimmed_mean_num_byzantine is not None:
+        cfg.trimmed_mean_num_byzantine = mr.trimmed_mean_num_byzantine
 
     print(f"Tasks: {task_names}")
     print(f"Attacks: {attacks}")

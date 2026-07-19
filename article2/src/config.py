@@ -7,6 +7,8 @@ Override with ``FedConfig.data_root`` or ``--data-root`` when needed.
 
 from __future__ import annotations
 
+import copy
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -95,6 +97,12 @@ class FedConfig:
     # (ported without sklearn dependency; math-equivalent PCA via SVD).
     fldefender_pca_components: int = 2
     fldefender_q1: float = 0.25
+    # AlignIns: TDA (direction) + MPSA (principal-sign on top-|Δ| coords)
+    alignins_sparsity: float = 0.9
+    alignins_lambda_s: float = 1.0
+    alignins_lambda_c: float = 1.0
+    # BNGuard: BN-feature L2 distance from median + tau * MAD
+    bnguard_tau: float = 3.0
 
     # --- SVDD ---
     svdd_warmup_rounds: int = 100
@@ -138,6 +146,50 @@ class FedConfig:
     dirichlet_noniid_beta: float | None = None
 
 
+@dataclass
+class MatrixRunConfig:
+    """``run_matrix`` 默认：任务 × 攻击 × 防御网格；字段可被 JSON（``--config``）覆盖。"""
+
+    # 与 argparse 时期一致：task 为 ``all``、逗号分隔或单个名；attacks/defenses 为 ``all`` 或逗号分隔。
+    task: str = "cifar10"
+    attacks: str = "all"
+    defenses: str = "all"
+    # ``None`` → ``<project>/log``
+    log_dir: str | None = None
+    total_rounds: int = 300
+    num_clients: int = 50
+    # 矩阵脚本历史上默认 40，与 ``FedConfig`` 默认 35 区分。
+    num_benign: int = 40
+    data_root: str | None = None
+    local_epochs: int = 1
+    num_workers: int | None = None
+    # ``None`` 表示不覆盖 ``FedConfig`` 默认（例如 dirichlet）。
+    dirichlet_alpha: float | None = None
+    seed: int = 42
+    device: str = "cuda"
+    trimmed_mean_num_byzantine: int | None = None
+
+
+DEFAULT_MATRIX_RUN = MatrixRunConfig()
+
+
+def load_matrix_run_config(path: str | Path | None = None) -> MatrixRunConfig:
+    """深拷贝 ``DEFAULT_MATRIX_RUN``，若给定 ``path`` 则按 JSON 键合并（未知键报错）。"""
+
+    cfg = copy.deepcopy(DEFAULT_MATRIX_RUN)
+    if path is None:
+        return cfg
+    p = Path(path)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Matrix run config JSON must be a single object at the top level.")
+    for key, value in data.items():
+        if not hasattr(cfg, key):
+            raise ValueError(f"Unknown MatrixRunConfig field: {key!r}")
+        setattr(cfg, key, value)
+    return cfg
+
+
 # --- Attack / defense short names (canonical); long CLI names map here ---
 ATTACK_ALIASES: dict[str, str] = {
     "gaussian_noise": "gn",
@@ -153,6 +205,8 @@ DEFENSE_ALIASES: dict[str, str] = {
     "multi_krum": "mk",
     "fedseca": "seca",
     "fl_defender": "fld",
+    "align_ins": "alignins",
+    "bn_guard": "bnguard",
 }
 
 
