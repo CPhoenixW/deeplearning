@@ -20,7 +20,7 @@ try:
     )
     from .main import run_federated
     from .server import DEFENSE_REGISTRY
-    from .tasks import TASK_REGISTRY
+    from .tasks import TASK_REGISTRY, get_task
 except ImportError:
     from clients import ATTACK_REGISTRY
     from config import (
@@ -34,7 +34,7 @@ except ImportError:
     )
     from main import run_federated
     from server import DEFENSE_REGISTRY
-    from tasks import TASK_REGISTRY
+    from tasks import TASK_REGISTRY, get_task
 
 
 def parse_list_arg(value: str) -> List[str]:
@@ -85,6 +85,7 @@ def run_one_combo(
     attack: str,
     defense: str,
     output_dir: Path,
+    prepared_dataloaders=None,
 ) -> Path:
     attack_id = normalize_attack_name(attack)
     defense_id = normalize_defense_name(defense)
@@ -94,7 +95,12 @@ def run_one_combo(
     apply_defense_to_config(cfg, defense_id)
 
     started_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    rounds = run_federated(cfg, use_svdd=None, collect_metrics=True)
+    rounds = run_federated(
+        cfg,
+        use_svdd=None,
+        collect_metrics=True,
+        prepared_dataloaders=prepared_dataloaders,
+    )
     finished_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
     if rounds is None:
@@ -118,10 +124,21 @@ def run_one_combo(
             "dirichlet_noniid_beta": cfg.dirichlet_noniid_beta,
             "seed": cfg.seed,
             "device": cfg.device,
+            "use_amp": cfg.use_amp,
+            "channels_last": cfg.channels_last,
+            "cuda_aggregation": cfg.cuda_aggregation,
+            "reuse_client_model": cfg.reuse_client_model,
+            "skip_redundant_attack_training": cfg.skip_redundant_attack_training,
+            "round_diagnostics": cfg.round_diagnostics,
             "trimmed_mean_ratio": cfg.trimmed_mean_ratio,
             "trimmed_mean_num_byzantine": cfg.trimmed_mean_num_byzantine,
             "krum_num_byzantine": cfg.krum_num_byzantine,
             "multi_krum_num_selected": cfg.multi_krum_num_selected,
+            "svdd_input_mode": cfg.svdd_input_mode,
+            "svdd_feature_mode": cfg.svdd_feature_mode,
+            "param_descriptor_dim": cfg.param_descriptor_dim,
+            "param_descriptor_seed": cfg.param_descriptor_seed,
+            "param_descriptor_device": cfg.param_descriptor_device,
         },
         "round_metrics": rounds,
     }
@@ -200,6 +217,36 @@ def main() -> None:
     cfg.local_epochs = int(mr.local_epochs)
     if mr.num_workers is not None:
         cfg.num_workers = int(mr.num_workers)
+    cfg.use_amp = bool(mr.use_amp)
+    cfg.channels_last = bool(mr.channels_last)
+    cfg.cuda_aggregation = bool(mr.cuda_aggregation)
+    cfg.reuse_client_model = bool(mr.reuse_client_model)
+    cfg.skip_redundant_attack_training = bool(mr.skip_redundant_attack_training)
+    cfg.round_diagnostics = bool(mr.round_diagnostics)
+    if mr.svdd_input_mode is not None:
+        cfg.svdd_input_mode = str(mr.svdd_input_mode)
+    if mr.svdd_feature_mode is not None:
+        cfg.svdd_feature_mode = str(mr.svdd_feature_mode)
+    if mr.param_descriptor_dim is not None:
+        cfg.param_descriptor_dim = int(mr.param_descriptor_dim)
+    if mr.param_descriptor_seed is not None:
+        cfg.param_descriptor_seed = int(mr.param_descriptor_seed)
+    if mr.param_descriptor_device is not None:
+        cfg.param_descriptor_device = str(mr.param_descriptor_device)
+    for name in (
+        "flgmm_warmup_rounds",
+        "flgmm_control_l",
+        "flgmm_em_iters",
+        "flanders_window",
+        "flanders_sampling",
+        "flanders_maxiter",
+        "flanders_alpha",
+        "flanders_beta",
+        "flanders_num_clients_to_keep",
+    ):
+        value = getattr(mr, name, None)
+        if value is not None:
+            setattr(cfg, name, value)
     if mr.dirichlet_alpha is not None:
         cfg.dirichlet_alpha = None if mr.dirichlet_alpha < 0 else float(mr.dirichlet_alpha)
     cfg.seed = mr.seed
@@ -217,11 +264,24 @@ def main() -> None:
     total = len(task_names) * len(attacks) * len(defenses)
     idx = 0
     for task_name in task_names:
+        data_cfg = copy.deepcopy(cfg)
+        data_cfg.task_name = task_name
+        task = get_task(data_cfg)
+        data_cfg.num_classes = task.num_classes
+        print(f"Preparing shared dataloaders for task={task_name} ...")
+        prepared_dataloaders = task.build_dataloaders(data_cfg)
         for attack in attacks:
             for defense in defenses:
                 idx += 1
                 print(f"\n=== [{idx}/{total}] task={task_name} attack={attack} defense={defense} ===")
-                out_path = run_one_combo(cfg, task_name, attack, defense, output_dir)
+                out_path = run_one_combo(
+                    cfg,
+                    task_name,
+                    attack,
+                    defense,
+                    output_dir,
+                    prepared_dataloaders=prepared_dataloaders,
+                )
                 print(f"Saved: {out_path}")
 
 

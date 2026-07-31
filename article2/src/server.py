@@ -11,6 +11,7 @@ from torch.nn.utils import clip_grad_norm_
 
 try:
     from .config import FedConfig
+    from .fixed_descriptor import FixedHierarchicalMultiViewDescriptor
     from .models import AutoEncoder
     from .utils import (
         aggregate_updates_with_info,
@@ -22,6 +23,7 @@ try:
     )
 except ImportError:
     from config import FedConfig
+    from fixed_descriptor import FixedHierarchicalMultiViewDescriptor
     from models import AutoEncoder
     from utils import (
         aggregate_updates_with_info,
@@ -70,6 +72,12 @@ class BaseServer:
     def state_dict_for_clients(self) -> Dict[str, Tensor]:
         sd = self.global_model.state_dict()
         return {k: v.detach().cpu().clone() for k, v in sd.items()}
+
+    @property
+    def aggregation_device(self) -> torch.device:
+        if self.config.cuda_aggregation and self.device.type == "cuda":
+            return self.device
+        return torch.device("cpu")
 
     def aggregate(
         self,
@@ -738,6 +746,129 @@ def _mad_zscores(values: Tensor) -> Tensor:
     return (values - med).abs() / mad
 
 
+def _state_l2_distance(left: Dict[str, Tensor], right: Dict[str, Tensor]) -> float:
+    dist_sq = 0.0
+    for k, l in left.items():
+        if not l.is_floating_point():
+            continue
+        r = right[k]
+        diff = l.detach().cpu().float() - r.detach().cpu().float()
+        dist_sq += float((diff * diff).sum().item())
+    return float(np.sqrt(max(dist_sq, 0.0)))
+
+
+def _fit_1d_gmm_largest_cluster(
+    values: np.ndarray,
+    *,
+    n_iter: int,
+) -> Tuple[np.ndarray, float, float]:
+    """Fit a tiny two-component 1-D GMM and return the largest component mask.
+
+    FLGMM's official code uses sklearn GaussianMixture.  This EM routine keeps
+    the same modeling idea without adding sklearn as a runtime dependency.
+    """
+
+    x = np.asarray(values, dtype=np.float64).reshape(-1)
+    n = int(x.size)
+    if n == 0:
+        return np.zeros(0, dtype=bool), 0.0, 1.0
+    if n < 2 or float(np.std(x)) < 1e-12:
+        return np.ones(n, dtype=bool), float(np.mean(x)), max(float(np.std(x)), 1e-6)
+
+    means = np.array([np.quantile(x, 0.25), np.quantile(x, 0.75)], dtype=np.float64)
+    variances = np.full(2, max(float(np.var(x)), 1e-6), dtype=np.float64)
+    weights = np.full(2, 0.5, dtype=np.float64)
+
+    for _ in range(max(1, int(n_iter))):
+        probs = []
+        for j in range(2):
+            var = max(float(variances[j]), 1e-6)
+            coef = weights[j] / np.sqrt(2.0 * np.pi * var)
+            probs.append(coef * np.exp(-0.5 * ((x - means[j]) ** 2) / var))
+        resp = np.stack(probs, axis=1)
+        resp_sum = resp.sum(axis=1, keepdims=True)
+        resp = resp / np.clip(resp_sum, 1e-12, None)
+        nk = resp.sum(axis=0)
+        for j in range(2):
+            if nk[j] <= 1e-12:
+                continue
+            weights[j] = nk[j] / float(n)
+            means[j] = float((resp[:, j] * x).sum() / nk[j])
+            variances[j] = float((resp[:, j] * ((x - means[j]) ** 2)).sum() / nk[j])
+            variances[j] = max(float(variances[j]), 1e-6)
+
+    labels = np.argmax(resp, axis=1)
+    counts = np.bincount(labels, minlength=2)
+    normal_component = int(np.argmax(counts))
+    mask = labels == normal_component
+    normal_vals = x[mask]
+    return mask, float(np.mean(normal_vals)), max(float(np.std(normal_vals)), 1e-6)
+
+
+def _sample_flat_delta(
+    global_sd: Dict[str, Tensor],
+    client_sd: Dict[str, Tensor],
+    indices: Optional[Tensor],
+) -> Tensor:
+    flat = _flatten_delta(global_sd, client_sd)
+    if indices is None:
+        return flat
+    return flat[indices]
+
+
+def _mar_forecast(
+    X: np.ndarray,
+    *,
+    pred_step: int,
+    alpha: float,
+    beta: float,
+    maxiter: int,
+) -> np.ndarray:
+    """Matrix autoregressive forecast used by FLANDERS.
+
+    X shape is (clients, sampled_params, time).  The implementation follows the
+    Flower baseline's MAR routine, with pseudoinverse for numerical stability.
+    """
+
+    m, n, T = X.shape
+    if T < 2:
+        return X[:, :, -1:][:, :, :pred_step]
+
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((m, m))
+    B = rng.standard_normal((n, n))
+    x_min = float(np.min(X))
+    x_scale = float(np.max(X) - x_min)
+    if abs(x_scale) < 1e-12:
+        X_norm = np.zeros_like(X, dtype=np.float64)
+    else:
+        X_norm = (X - x_min) / x_scale
+
+    eye_m = np.identity(m)
+    eye_n = np.identity(n)
+    for _ in range(max(1, int(maxiter))):
+        bt_b = B.T @ B
+        lhs = np.zeros((m, m))
+        rhs = np.zeros((m, m))
+        for t in range(1, T):
+            lhs += X_norm[:, :, t] @ B @ X_norm[:, :, t - 1].T
+            rhs += X_norm[:, :, t - 1] @ bt_b @ X_norm[:, :, t - 1].T
+        A = lhs @ np.linalg.pinv(rhs + float(alpha) * eye_m)
+
+        at_a = A.T @ A
+        lhs = np.zeros((n, n))
+        rhs = np.zeros((n, n))
+        for t in range(1, T):
+            lhs += X_norm[:, :, t].T @ A @ X_norm[:, :, t - 1]
+            rhs += X_norm[:, :, t - 1].T @ at_a @ X_norm[:, :, t - 1]
+        B = lhs @ np.linalg.pinv(rhs + float(beta) * eye_n)
+
+    tensor = np.append(X, np.zeros((m, n, pred_step), dtype=np.float64), axis=2)
+    for s in range(pred_step):
+        tensor[:, :, T + s] = A @ tensor[:, :, T + s - 1] @ B.T
+    return tensor[:, :, -pred_step:]
+
+
 class AlignInsServer(BaseServer):
     """AlignIns-style update filtering (TDA + MPSA) on flattened floating deltas.
 
@@ -838,7 +969,11 @@ class BNGuardServer(BaseServer):
             m = torch.ones_like(m)
         alpha = m / (m.sum() + 1e-12)
 
-        global_sd = weighted_fedavg(client_state_dicts, alpha.detach().cpu())
+        global_sd = weighted_fedavg(
+            client_state_dicts,
+            alpha.detach().cpu(),
+            device=self.aggregation_device,
+        )
         self.global_model.load_state_dict(global_sd)
 
         n_kept = int(m.sum().item())
@@ -860,12 +995,218 @@ class BNGuardServer(BaseServer):
         )
 
 
+class FLGMMServer(BaseServer):
+    """FLGMM-style GMM/SPC filtering over model-distance statistics."""
+
+    defense_name = "flgmm"
+
+    def __init__(
+        self,
+        config: FedConfig,
+        d_bn: int,
+        device: torch.device,
+        model_fn: Callable[[], nn.Module],
+    ) -> None:
+        super().__init__(config, d_bn, device, model_fn)
+        self._distance_history: List[List[float]] = []
+        self._ucl: Optional[float] = None
+
+    def _ensure_history(self, k: int) -> None:
+        if len(self._distance_history) != k:
+            self._distance_history = [[] for _ in range(k)]
+            self._ucl = None
+
+    def aggregate(self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]) -> RoundStats:
+        k = len(client_state_dicts)
+        self._ensure_history(k)
+
+        # FLGMM first compares local models against the all-client temporary
+        # FedAvg model, then models this 1-D distance distribution.
+        temp_global_sd = weighted_fedavg(
+            client_state_dicts, torch.full((k,), 1.0 / float(k), dtype=torch.float32)
+        )
+        raw_dist = np.array(
+            [_state_l2_distance(sd, temp_global_sd) for sd in client_state_dicts],
+            dtype=np.float64,
+        )
+        normal_mask, normal_mean, normal_std = _fit_1d_gmm_largest_cluster(
+            raw_dist, n_iter=int(self.config.flgmm_em_iters)
+        )
+        z_dist = (raw_dist - normal_mean) / max(normal_std, 1e-6)
+        for i, z in enumerate(z_dist.tolist()):
+            self._distance_history[i].append(float(z))
+
+        warmup = max(1, int(self.config.flgmm_warmup_rounds))
+        if round_idx <= warmup:
+            m_np = normal_mask.astype(np.float32)
+            phase = "flgmm | GMM Warm-up"
+            if round_idx == warmup:
+                all_z = np.array(
+                    [z for hist in self._distance_history for z in hist],
+                    dtype=np.float64,
+                )
+                normal_z_mask, _, _ = _fit_1d_gmm_largest_cluster(
+                    all_z, n_iter=int(self.config.flgmm_em_iters)
+                )
+                normal_z = all_z[normal_z_mask]
+                if normal_z.size == 0:
+                    normal_z = all_z
+                self._ucl = float(
+                    np.mean(normal_z)
+                    + float(self.config.flgmm_control_l) * max(float(np.std(normal_z)), 1e-6)
+                )
+        else:
+            ucl = float(self._ucl) if self._ucl is not None else float(
+                np.mean(z_dist) + float(self.config.flgmm_control_l) * max(float(np.std(z_dist)), 1e-6)
+            )
+            m_np = (z_dist < ucl).astype(np.float32)
+            phase = "flgmm | SPC Filtering"
+
+        m = torch.tensor(m_np, dtype=torch.float32)
+        if m.sum() < 1:
+            m = torch.ones_like(m)
+        alpha = m / (m.sum() + 1e-12)
+        global_sd = weighted_fedavg(
+            client_state_dicts,
+            alpha.detach().cpu(),
+            device=self.aggregation_device,
+        )
+        self.global_model.load_state_dict(global_sd)
+
+        d = torch.tensor(z_dist, dtype=torch.float32)
+        kept = int(m.sum().item())
+        ucl_label = "pending" if self._ucl is None else f"{self._ucl:.4f}"
+        return RoundStats(
+            center_norm=float("nan"),
+            z_var=0.0,
+            ae_loss=float("nan"),
+            svdd_loss=float("nan"),
+            d=d.detach().cpu(),
+            m=m.detach().cpu(),
+            alpha=alpha.detach().cpu(),
+            phase=phase,
+            show_detection=True,
+            monitor_items=[
+                ("Defense", "FLGMM"),
+                ("GMM normal mean", f"{normal_mean:.4f}"),
+                ("GMM normal std", f"{normal_std:.4f}"),
+                ("SPC UCL", ucl_label),
+                ("Kept clients", f"{kept}/{k}"),
+            ],
+        )
+
+
+class FLANDERSServer(BaseServer):
+    """FLANDERS-style MAR forecast filtering over client parameter time series."""
+
+    defense_name = "flanders"
+
+    def __init__(
+        self,
+        config: FedConfig,
+        d_bn: int,
+        device: torch.device,
+        model_fn: Callable[[], nn.Module],
+    ) -> None:
+        super().__init__(config, d_bn, device, model_fn)
+        self._history: List[List[np.ndarray]] = []
+        self._sample_idx: Optional[Tensor] = None
+
+    def _ensure_state(self, k: int, flat_dim: int) -> None:
+        if len(self._history) != k:
+            self._history = [[] for _ in range(k)]
+        if self._sample_idx is None:
+            sample_n = int(self.config.flanders_sampling)
+            if sample_n <= 0 or sample_n >= flat_dim:
+                self._sample_idx = None
+            else:
+                gen = torch.Generator()
+                gen.manual_seed(int(self.config.seed))
+                self._sample_idx = torch.randperm(flat_dim, generator=gen)[:sample_n]
+
+    def aggregate(self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]) -> RoundStats:
+        k = len(client_state_dicts)
+        global_sd = self.state_dict_for_clients()
+        first_flat = _flatten_delta(global_sd, client_state_dicts[0])
+        self._ensure_state(k, int(first_flat.numel()))
+
+        sampled_updates: List[Tensor] = [first_flat if self._sample_idx is None else first_flat[self._sample_idx]]
+        for sd in client_state_dicts[1:]:
+            sampled_updates.append(_sample_flat_delta(global_sd, sd, self._sample_idx))
+
+        current = np.stack([u.detach().cpu().numpy().astype(np.float64) for u in sampled_updates], axis=0)
+        for i, row in enumerate(current):
+            self._history[i].append(row)
+            window = int(self.config.flanders_window)
+            if window > 0 and len(self._history[i]) > window:
+                self._history[i] = self._history[i][-window:]
+
+        min_hist = min(len(h) for h in self._history) if self._history else 0
+        if min_hist < 2:
+            scores = np.zeros(k, dtype=np.float64)
+            m = torch.ones(k, dtype=torch.float32)
+            phase = "flanders | Warm-up"
+        else:
+            hist = np.stack([np.stack(h[-min_hist:], axis=0) for h in self._history], axis=0)
+            params_tensor = np.transpose(hist, (0, 2, 1))  # (clients, params, time)
+            ground_truth = params_tensor[:, :, -1].copy()
+            predicted = _mar_forecast(
+                params_tensor[:, :, :-1],
+                pred_step=1,
+                alpha=float(self.config.flanders_alpha),
+                beta=float(self.config.flanders_beta),
+                maxiter=int(self.config.flanders_maxiter),
+            )[:, :, 0]
+            scores = np.sqrt(np.sum((ground_truth - predicted) ** 2, axis=1))
+            keep_n_cfg = self.config.flanders_num_clients_to_keep
+            keep_n = int(keep_n_cfg) if keep_n_cfg is not None else int(self.config.num_benign)
+            keep_n = max(1, min(k, keep_n))
+            keep_idx = np.argsort(scores)[:keep_n]
+            m_np = np.zeros(k, dtype=np.float32)
+            m_np[keep_idx] = 1.0
+            m = torch.tensor(m_np, dtype=torch.float32)
+            phase = "flanders | MAR Filtering"
+
+        alpha = m / (m.sum() + 1e-12)
+        global_sd_new = weighted_fedavg(
+            client_state_dicts,
+            alpha.detach().cpu(),
+            device=self.aggregation_device,
+        )
+        self.global_model.load_state_dict(global_sd_new)
+
+        d = torch.tensor(scores, dtype=torch.float32)
+        kept = int(m.sum().item())
+        return RoundStats(
+            center_norm=float("nan"),
+            z_var=0.0,
+            ae_loss=float("nan"),
+            svdd_loss=float("nan"),
+            d=d.detach().cpu(),
+            m=m.detach().cpu(),
+            alpha=alpha.detach().cpu(),
+            phase=phase,
+            show_detection=True,
+            monitor_items=[
+                ("Defense", "FLANDERS"),
+                ("MAR window used", f"{min_hist}"),
+                ("Sampled params", f"{int(current.shape[1])}"),
+                ("MAR score avg", f"{float(np.mean(scores)):.4f}"),
+                ("Kept clients", f"{kept}/{k}"),
+            ],
+        )
+
+
 class FedAvgServer(BaseServer):
     defense_name = "avg"
 
     def aggregate(self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]) -> RoundStats:
         k = len(client_state_dicts)
-        global_sd, m, alpha = aggregate_updates_with_info(client_state_dicts, method="fedavg")
+        global_sd, m, alpha = aggregate_updates_with_info(
+            client_state_dicts,
+            method="fedavg",
+            device=self.aggregation_device,
+        )
         self.global_model.load_state_dict(global_sd)
         return RoundStats(
             center_norm=float("nan"),
@@ -900,6 +1241,7 @@ class TrimmedMeanServer(BaseServer):
             method="trimmed_mean",
             trim_ratio=self.config.trimmed_mean_ratio,
             num_byzantine=num_byzantine,
+            device=self.aggregation_device,
         )
         self.global_model.load_state_dict(global_sd)
         kept_per_coordinate = k - 2 * int(num_byzantine)
@@ -933,12 +1275,27 @@ class MultiKrumServer(BaseServer):
             else max(0, self.config.num_clients - self.config.num_benign)
         )
         krum_neighbors = k - num_byzantine - 2
-        krum_scores = compute_multi_krum_scores(client_state_dicts, num_byzantine=num_byzantine).detach().cpu()
-        global_sd, m, alpha = aggregate_updates_with_info(
+        krum_scores_dev = compute_multi_krum_scores(
             client_state_dicts,
-            method="multi_krum",
             num_byzantine=num_byzantine,
-            num_selected=self.config.multi_krum_num_selected,
+            device=self.aggregation_device,
+        )
+        krum_scores = krum_scores_dev.detach().cpu()
+        selected_m = (
+            self.config.multi_krum_num_selected
+            if self.config.multi_krum_num_selected is not None
+            else krum_neighbors
+        )
+        selected_m = max(1, min(int(selected_m), k))
+        selected = torch.topk(krum_scores_dev, k=selected_m, largest=False).indices.detach().cpu()
+        m = torch.zeros(k)
+        m[selected] = 1.0
+        alpha = m / m.sum()
+        selected_sds = [client_state_dicts[int(i)] for i in selected.tolist()]
+        global_sd = weighted_fedavg(
+            selected_sds,
+            torch.full((selected_m,), 1.0 / float(selected_m)),
+            device=self.aggregation_device,
         )
         self.global_model.load_state_dict(global_sd)
         selected_count = int(m.sum().item())
@@ -980,6 +1337,29 @@ class SVDDServer(BaseServer):
         self._svdd_feat: Callable[[Dict[str, Tensor]], Tensor] = (
             svdd_feature_extractor or extract_bn_features
         )
+        self._fixed_descriptor: Optional[FixedHierarchicalMultiViewDescriptor] = None
+        feature_mode = str(getattr(config, "svdd_feature_mode", "task")).lower().strip()
+        if feature_mode == "fixed_projection":
+            descriptor_device_name = str(
+                getattr(config, "param_descriptor_device", "cpu")
+            ).lower().strip()
+            if descriptor_device_name == "auto":
+                descriptor_device = self.device
+            elif descriptor_device_name in {"cpu", "cuda"}:
+                descriptor_device = torch.device(descriptor_device_name)
+            else:
+                raise ValueError(
+                    "param_descriptor_device must be 'cpu', 'cuda', or 'auto'."
+                )
+            if descriptor_device.type == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError("CUDA parameter descriptor requested but CUDA is unavailable.")
+            self._fixed_descriptor = FixedHierarchicalMultiViewDescriptor(
+                self.state_dict_for_clients(),
+                parameter_names=self.param_names,
+                output_dim=int(config.param_descriptor_dim),
+                seed=int(config.param_descriptor_seed),
+                projection_device=descriptor_device,
+            )
         # 限制潜在空间维度，避免高维距离退化
         latent_dim = min(config.latent_dim, 64)
         self.ae = AutoEncoder(d_bn=d_bn, latent_dim=latent_dim).to(self.device)
@@ -988,6 +1368,26 @@ class SVDDServer(BaseServer):
 
         self.optimizer_ae = torch.optim.Adam(
             self.ae.parameters(), lr=config.ae_lr, weight_decay=config.ae_weight_decay
+        )
+
+    def _build_input_matrix(
+        self, client_state_dicts: List[Dict[str, Tensor]]
+    ) -> Tensor:
+        """Build absolute-model or pre-round model-delta features."""
+
+        if self._fixed_descriptor is not None:
+            return self._fixed_descriptor.describe_many(
+                client_state_dicts,
+                self.state_dict_for_clients(),
+            )
+
+        mode = str(getattr(self.config, "svdd_input_mode", "absolute")).lower().strip()
+        reference_sd = self._state_dict_for_clients() if mode == "delta" else None
+        return build_svdd_feature_matrix(
+            client_state_dicts,
+            self._svdd_feat,
+            input_mode=mode,
+            reference_state_dict=reference_sd,
         )
 
     def _state_dict_for_clients(self) -> Dict[str, Tensor]:
@@ -1009,7 +1409,7 @@ class SVDDServer(BaseServer):
             per-client reconstruction loss (all K, for monitoring), keep_mask (bool K)
         """
 
-        X = build_svdd_feature_matrix(client_state_dicts, self._svdd_feat)  # (K, D_feat)
+        X = self._build_input_matrix(client_state_dicts)  # (K, D_feat)
         X = robust_scale_features(X)
         K = int(X.shape[0])
         ratio = float(getattr(self.config, "ae_warmup_keep_ratio", 0.8))
@@ -1044,7 +1444,11 @@ class SVDDServer(BaseServer):
 
         selected_sds = [client_state_dicts[int(i)] for i in idx_keep.tolist()]
         alpha_sel = torch.full((num_keep,), 1.0 / float(num_keep))
-        global_sd = weighted_fedavg(selected_sds, alpha_sel)
+        global_sd = weighted_fedavg(
+            selected_sds,
+            alpha_sel,
+            device=self.aggregation_device,
+        )
         self.global_model.load_state_dict(global_sd)
 
         with torch.no_grad():
@@ -1058,7 +1462,7 @@ class SVDDServer(BaseServer):
     def init_center(self, client_state_dicts: List[Dict[str, Tensor]]) -> Tuple[float, float]:
         """Initialize SVDD center c using well-reconstructed clients."""
 
-        X = build_svdd_feature_matrix(client_state_dicts, self._svdd_feat)
+        X = self._build_input_matrix(client_state_dicts)
         X = robust_scale_features(X).to(self.device)
         self.ae.eval()
         with torch.no_grad():
@@ -1087,7 +1491,7 @@ class SVDDServer(BaseServer):
 
         assert self.c is not None, "SVDD center c must be initialized before Phase 2."
 
-        X = build_svdd_feature_matrix(client_state_dicts, self._svdd_feat)
+        X = self._build_input_matrix(client_state_dicts)
         X = robust_scale_features(X)
 
         # Embeddings without grad
@@ -1147,7 +1551,11 @@ class SVDDServer(BaseServer):
         self.optimizer_ae.step()
 
         # Weighted aggregation
-        global_sd = weighted_fedavg(client_state_dicts, alpha.detach().cpu())
+        global_sd = weighted_fedavg(
+            client_state_dicts,
+            alpha.detach().cpu(),
+            device=self.aggregation_device,
+        )
         self.global_model.load_state_dict(global_sd)
 
         center_norm = float(self.c.norm().item())
@@ -1183,6 +1591,11 @@ class SVDDServer(BaseServer):
                 show_detection=True,
                 monitor_items=[
                     ("Defense", "SVDD"),
+                    ("Feature Mode", str(self.config.svdd_feature_mode)),
+                    (
+                        "SVDD Input",
+                        "delta" if self._fixed_descriptor is not None else str(self.config.svdd_input_mode),
+                    ),
                     ("AE+FedAvg clients", f"{n_kept}/{k_tot}"),
                     ("Center L2-Norm", f"{center_norm:.6f}"),
                     ("Z-Space Variance", f"{z_var:.6f}"),
@@ -1214,6 +1627,11 @@ class SVDDServer(BaseServer):
             show_detection=True,
             monitor_items=[
                 ("Defense", "SVDD (hard)"),
+                ("Feature Mode", str(self.config.svdd_feature_mode)),
+                (
+                    "SVDD Input",
+                    "delta" if self._fixed_descriptor is not None else str(self.config.svdd_input_mode),
+                ),
                 ("Kept clients", f"{kept}/{k_tot}"),
                 ("Center L2-Norm", f"{center_norm:.6f}"),
                 ("Z-Space Variance", f"{z_var:.6f}"),
@@ -1232,8 +1650,9 @@ DEFENSE_REGISTRY: Dict[str, Type[BaseServer]] = {
     "fld": FLDefenderServer,
     "alignins": AlignInsServer,
     "bnguard": BNGuardServer,
+    "flgmm": FLGMMServer,
+    "flanders": FLANDERSServer,
 }
 
 # Backward compatibility
 FederatedServer = SVDDServer
-

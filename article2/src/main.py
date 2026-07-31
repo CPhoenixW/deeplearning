@@ -33,15 +33,29 @@ def resolve_device(config: FedConfig) -> torch.device:
     return torch.device("cpu")
 
 
-def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> Tuple[float, int, int]:
+def evaluate(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    *,
+    use_amp: bool = False,
+    channels_last: bool = False,
+) -> Tuple[float, int, int]:
     model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
         for x, y in loader:
-            x = x.to(device)
-            y = y.to(device)
-            logits = model(x)
+            x = x.to(device, non_blocking=True)
+            y = y.to(device, non_blocking=True)
+            if channels_last and x.ndim == 4:
+                x = x.contiguous(memory_format=torch.channels_last)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=bool(use_amp and device.type == "cuda"),
+            ):
+                logits = model(x)
             preds = torch.argmax(logits, dim=1)
             correct += (preds == y).sum().item()
             total += y.size(0)
@@ -138,7 +152,7 @@ def _defense_specific_monitor_items(
             ("cos(Δg, meanΔ_ben)", f"{cos_ben:.4f}"),
             ("cos(Δg, meanΔ_mal)", f"{cos_mal:.4f}"),
         ]
-    if dn in ("svdd", "seca", "fld", "alignins", "bnguard"):
+    if dn in ("svdd", "seca", "fld", "alignins", "bnguard", "flgmm", "flanders"):
         return common_global + [
             ("Client Δ L2 (ben avg)", f"{ben_norm_mean:.6f}"),
             ("Client Δ L2 (mal avg)", f"{mal_norm_mean:.6f}"),
@@ -178,8 +192,21 @@ def build_clients(
 
     clients: List[BaseClient] = []
 
+    # Matrix clients execute serially, so they may share one training model.
+    # Direct runs can retain historical model-construction RNG consumption.
+    shared_client_model = None
+    if config.reuse_client_model:
+        shared_client_model = task.build_model().to(device)
+        if config.channels_last and device.type == "cuda":
+            shared_client_model = shared_client_model.to(memory_format=torch.channels_last)
+
     def model_fn():
-        return task.build_model()
+        if shared_client_model is not None:
+            return shared_client_model
+        model = task.build_model().to(device)
+        if config.channels_last and device.type == "cuda":
+            model = model.to(memory_format=torch.channels_last)
+        return model
 
     # Benign
     for cid in benign_ids:
@@ -271,9 +298,15 @@ def run_federated(
     config: FedConfig,
     use_svdd: Optional[bool] = None,
     collect_metrics: bool = False,
+    prepared_dataloaders: Optional[Tuple[List[DataLoader], DataLoader]] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     set_seed(config.seed)
     device = resolve_device(config)
+    if device.type == "cuda" and (config.use_amp or config.channels_last):
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
     config.attack_type = normalize_attack_name(config.attack_type)
     config.defense_type = normalize_defense_name(config.defense_type)
@@ -282,15 +315,33 @@ def run_federated(
     task = get_task(config)
     config.num_classes = task.num_classes
 
-    client_loaders, test_loader = task.build_dataloaders(config)
+    if prepared_dataloaders is None:
+        client_loaders, test_loader = task.build_dataloaders(config)
+    else:
+        client_loaders, test_loader = prepared_dataloaders
+        if len(client_loaders) != config.num_clients:
+            raise ValueError(
+                "Prepared dataloader count does not match config.num_clients: "
+                f"{len(client_loaders)} != {config.num_clients}."
+            )
     clients, gt = build_clients(config, device, client_loaders, task)
-
-    tmp_model = task.build_model()
 
     def _svdd_feat(sd: Dict[str, Tensor]) -> Tensor:
         return task.extract_svdd_features(config, sd)
 
-    d_bn = _svdd_feat(tmp_model.state_dict()).numel()
+    feature_mode = str(config.svdd_feature_mode).lower().strip()
+    if feature_mode == "fixed_projection":
+        d_bn = int(config.param_descriptor_dim)
+        if d_bn not in (4096, 8192):
+            raise ValueError("param_descriptor_dim must be 4096 or 8192.")
+    elif feature_mode == "task":
+        tmp_model = task.build_model()
+        d_bn = _svdd_feat(tmp_model.state_dict()).numel()
+    else:
+        raise ValueError(
+            f"Unknown svdd_feature_mode {config.svdd_feature_mode!r}. "
+            "Use 'task' or 'fixed_projection'."
+        )
 
     def model_fn():
         return task.build_model()
@@ -316,11 +367,20 @@ def run_federated(
 
     for r in range(1, total_rounds + 1):
         global_sd = server.state_dict_for_clients()
+        if device.type == "cuda":
+            # Stage the broadcast once. Loading this device copy into the shared
+            # client model avoids K repeated host-to-device model transfers.
+            global_sd_train = {
+                k: v.to(device, non_blocking=True) for k, v in global_sd.items()
+            }
+        else:
+            global_sd_train = global_sd
 
         client_sds: List[Dict[str, Tensor]] = []
         for c in clients:
-            local_sd = c.local_step(global_sd)
+            local_sd = c.local_step(global_sd_train, reference_state_dict=global_sd)
             client_sds.append(local_sd)
+        del global_sd_train
         _apply_lie_attack(config, defense_name, global_sd, client_sds)
 
         stats = server.aggregate(round_idx=r, client_state_dicts=client_sds)
@@ -332,52 +392,76 @@ def run_federated(
         M = stats.m
         alpha_out = stats.alpha
         phase = stats.phase
-        new_global_sd = server.state_dict_for_clients()
-
-        # Actual global update diagnostics (what truly changed this round).
-        global_delta = _flatten_float_state_delta(global_sd, new_global_sd)
-        upd_l2 = float(global_delta.norm(p=2).item())
-        upd_linf = float(global_delta.abs().max().item())
-        upd_mean_abs = float(global_delta.abs().mean().item())
-        upd_nonzero_ratio = float((global_delta != 0).float().mean().item())
-        bn_delta = _flatten_bn_buffer_delta(global_sd, new_global_sd)
-        bn_upd_l2 = float(bn_delta.norm(p=2).item())
-        bn_upd_linf = float(bn_delta.abs().max().item())
-        bn_upd_mean_abs = float(bn_delta.abs().mean().item())
-        bn_upd_nonzero_ratio = float((bn_delta != 0).float().mean().item())
-
-        # Client-side delta magnitude statistics (before defense aggregation).
-        client_norms = _client_delta_norms(global_sd, client_sds)
         benign_mask = gt == 1
         mal_mask = gt == 0
-        ben_norm_mean = float(client_norms[benign_mask].mean().item()) if benign_mask.any() else 0.0
-        mal_norm_mean = float(client_norms[mal_mask].mean().item()) if mal_mask.any() else 0.0
+        diagnostic_monitor_items: List[Tuple[str, str]] = []
+        if config.round_diagnostics:
+            new_global_sd = server.state_dict_for_clients()
 
-        # Direction alignment: is aggregated update closer to benign or malicious mean update?
-        cos_ben = 0.0
-        cos_mal = 0.0
-        with torch.no_grad():
-            if benign_mask.any():
-                ben_idx = torch.where(benign_mask)[0].tolist()
-                ben_deltas = torch.stack([_flatten_float_state_delta(global_sd, client_sds[i]) for i in ben_idx], dim=0)
-                ben_mean = ben_deltas.mean(dim=0)
-                cos_ben = float(
-                    torch.nn.functional.cosine_similarity(
-                        global_delta.unsqueeze(0), ben_mean.unsqueeze(0), dim=1
-                    ).item()
-                )
-            if mal_mask.any():
-                mal_idx = torch.where(mal_mask)[0].tolist()
-                mal_deltas = torch.stack([_flatten_float_state_delta(global_sd, client_sds[i]) for i in mal_idx], dim=0)
-                mal_mean = mal_deltas.mean(dim=0)
-                cos_mal = float(
-                    torch.nn.functional.cosine_similarity(
-                        global_delta.unsqueeze(0), mal_mean.unsqueeze(0), dim=1
-                    ).item()
-                )
+            # Actual global update diagnostics (what truly changed this round).
+            global_delta = _flatten_float_state_delta(global_sd, new_global_sd)
+            upd_l2 = float(global_delta.norm(p=2).item())
+            upd_linf = float(global_delta.abs().max().item())
+            upd_mean_abs = float(global_delta.abs().mean().item())
+            upd_nonzero_ratio = float((global_delta != 0).float().mean().item())
+            bn_delta = _flatten_bn_buffer_delta(global_sd, new_global_sd)
+            bn_upd_l2 = float(bn_delta.norm(p=2).item())
+            bn_upd_linf = float(bn_delta.abs().max().item())
+            bn_upd_mean_abs = float(bn_delta.abs().mean().item())
+            bn_upd_nonzero_ratio = float((bn_delta != 0).float().mean().item())
+
+            # Client-side delta magnitude statistics (before defense aggregation).
+            client_norms = _client_delta_norms(global_sd, client_sds)
+            ben_norm_mean = float(client_norms[benign_mask].mean().item()) if benign_mask.any() else 0.0
+            mal_norm_mean = float(client_norms[mal_mask].mean().item()) if mal_mask.any() else 0.0
+
+            # Direction alignment: is aggregated update closer to benign or malicious mean update?
+            cos_ben = 0.0
+            cos_mal = 0.0
+            with torch.no_grad():
+                if benign_mask.any():
+                    ben_idx = torch.where(benign_mask)[0].tolist()
+                    ben_deltas = torch.stack([_flatten_float_state_delta(global_sd, client_sds[i]) for i in ben_idx], dim=0)
+                    ben_mean = ben_deltas.mean(dim=0)
+                    cos_ben = float(
+                        torch.nn.functional.cosine_similarity(
+                            global_delta.unsqueeze(0), ben_mean.unsqueeze(0), dim=1
+                        ).item()
+                    )
+                if mal_mask.any():
+                    mal_idx = torch.where(mal_mask)[0].tolist()
+                    mal_deltas = torch.stack([_flatten_float_state_delta(global_sd, client_sds[i]) for i in mal_idx], dim=0)
+                    mal_mean = mal_deltas.mean(dim=0)
+                    cos_mal = float(
+                        torch.nn.functional.cosine_similarity(
+                            global_delta.unsqueeze(0), mal_mean.unsqueeze(0), dim=1
+                        ).item()
+                    )
+
+            diagnostic_monitor_items = _defense_specific_monitor_items(
+                defense_name,
+                upd_l2=upd_l2,
+                upd_linf=upd_linf,
+                upd_mean_abs=upd_mean_abs,
+                upd_nonzero_ratio=upd_nonzero_ratio,
+                bn_upd_l2=bn_upd_l2,
+                bn_upd_linf=bn_upd_linf,
+                bn_upd_mean_abs=bn_upd_mean_abs,
+                bn_upd_nonzero_ratio=bn_upd_nonzero_ratio,
+                ben_norm_mean=ben_norm_mean,
+                mal_norm_mean=mal_norm_mean,
+                cos_ben=cos_ben,
+                cos_mal=cos_mal,
+            )
 
         # Evaluation
-        test_acc, correct, total = evaluate(server.global_model, test_loader, device)
+        test_acc, correct, total = evaluate(
+            server.global_model,
+            test_loader,
+            device,
+            use_amp=config.use_amp,
+            channels_last=config.channels_last,
+        )
 
         # Monitoring metrics
         z_var_scalar = z_var
@@ -407,21 +491,7 @@ def run_federated(
             rr = float(tp / max(1, tp + fn))   # Recall
 
         # Pretty monitor output (defense-aware fields rather than one fixed block).
-        monitor_items = [("Task", config.task_name)] + list(stats.monitor_items) + _defense_specific_monitor_items(
-            defense_name,
-            upd_l2=upd_l2,
-            upd_linf=upd_linf,
-            upd_mean_abs=upd_mean_abs,
-            upd_nonzero_ratio=upd_nonzero_ratio,
-            bn_upd_l2=bn_upd_l2,
-            bn_upd_linf=bn_upd_linf,
-            bn_upd_mean_abs=bn_upd_mean_abs,
-            bn_upd_nonzero_ratio=bn_upd_nonzero_ratio,
-            ben_norm_mean=ben_norm_mean,
-            mal_norm_mean=mal_norm_mean,
-            cos_ben=cos_ben,
-            cos_mal=cos_mal,
-        )
+        monitor_items = [("Task", config.task_name)] + list(stats.monitor_items) + diagnostic_monitor_items
         print_monitor_round(
             round_idx=r,
             phase=phase,
@@ -498,7 +568,7 @@ def print_monitor_round(
         # Detection / trimming summary
         print()
         pl = phase.lower()
-        if "warm-up" in pl:
+        if "warm-up" in pl and not (pl.startswith("flgmm") or pl.startswith("flanders")):
             title = "AE Trimmed Loss"
             metric_name = "Loss (avg)"
             show_metric = True
@@ -518,6 +588,12 @@ def print_monitor_round(
                 show_metric = True
             elif pl.startswith("svdd"):
                 metric_name = "Dist (avg)"
+                show_metric = True
+            elif pl.startswith("flgmm"):
+                metric_name = "Std Dist (avg)"
+                show_metric = True
+            elif pl.startswith("flanders"):
+                metric_name = "MAR Score (avg)"
                 show_metric = True
             else:
                 metric_name = "Dist (avg)"
@@ -554,7 +630,7 @@ def print_monitor_round(
 
         # Per-client table
         print("+-------+----------+----------------+----------------+-------+")
-        if "warm-up" in pl:
+        if "warm-up" in pl and not (pl.startswith("flgmm") or pl.startswith("flanders")):
             col_name = "AE L1-Loss"
         elif pl.startswith("mk"):
             col_name = "Krum Score"
@@ -566,6 +642,10 @@ def print_monitor_round(
             col_name = "Trust"
         elif pl.startswith("svdd"):
             col_name = "Dist"
+        elif pl.startswith("flgmm"):
+            col_name = "Std Dist"
+        elif pl.startswith("flanders"):
+            col_name = "MAR Score"
         else:
             col_name = "Metric N/A"
         print(f"|    ID | Type     | {col_name:>14} |          Alpha |     M |")

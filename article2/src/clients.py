@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Tuple, Type
+from typing import Callable, Dict, Optional, Tuple, Type
 
 import torch
 from torch import Tensor, nn
@@ -23,7 +23,11 @@ class BaseClient(ABC):
         self.loader = loader
 
     @abstractmethod
-    def local_step(self, global_state_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    def local_step(
+        self,
+        global_state_dict: Dict[str, Tensor],
+        reference_state_dict: Optional[Dict[str, Tensor]] = None,
+    ) -> Dict[str, Tensor]:
         """Receive global model, perform local update, and return local model state_dict."""
 
 
@@ -33,6 +37,9 @@ class BenignClient(BaseClient):
     def __init__(self, client_id: int, device: torch.device, config: FedConfig, loader: DataLoader, model_fn) -> None:
         super().__init__(client_id, device, config, loader)
         self.model_fn = model_fn
+        self._criterion = self._build_criterion()
+        self._amp_enabled = bool(config.use_amp and device.type == "cuda")
+        self._scaler = torch.amp.GradScaler("cuda", enabled=self._amp_enabled)
 
     def _build_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         return torch.optim.SGD(
@@ -52,17 +59,28 @@ class BenignClient(BaseClient):
     def _train_one_round(self, model: nn.Module) -> None:
         model.train()
         optimizer = self._build_optimizer(model)
-        criterion = self._build_criterion()
         for _ in range(self.config.local_epochs):
             for x, y in self.loader:
-                x = x.to(self.device)
-                y = y.to(self.device)
+                x = x.to(self.device, non_blocking=True)
+                y = y.to(self.device, non_blocking=True)
+                if self.config.channels_last and x.ndim == 4:
+                    x = x.contiguous(memory_format=torch.channels_last)
                 x, y = self._transform_batch(x, y)
-                optimizer.zero_grad()
-                logits = model(x)
-                loss = criterion(logits, y)
-                loss.backward()
-                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                with torch.autocast(
+                    device_type=self.device.type,
+                    dtype=torch.float16,
+                    enabled=self._amp_enabled,
+                ):
+                    logits = model(x)
+                    loss = self._criterion(logits, y)
+                if self._amp_enabled:
+                    self._scaler.scale(loss).backward()
+                    self._scaler.step(optimizer)
+                    self._scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
 
     def _postprocess_upload(
         self,
@@ -72,12 +90,20 @@ class BenignClient(BaseClient):
         """Hook for subclasses to modify uploaded model state dict."""
         return {k: v.detach().cpu().clone() for k, v in local_state_dict.items()}
 
-    def local_step(self, global_state_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        model = self.model_fn().to(self.device)
+    def local_step(
+        self,
+        global_state_dict: Dict[str, Tensor],
+        reference_state_dict: Optional[Dict[str, Tensor]] = None,
+    ) -> Dict[str, Tensor]:
+        model = self.model_fn()
+        first_param = next(model.parameters(), None)
+        if first_param is not None and first_param.device != self.device:
+            model = model.to(self.device)
         model.load_state_dict(global_state_dict)
         self._train_one_round(model)
         local_sd = model.state_dict()
-        return self._postprocess_upload(global_state_dict, local_sd)
+        upload_reference = reference_state_dict or global_state_dict
+        return self._postprocess_upload(upload_reference, local_sd)
 
 
 class MaliciousClientBase(BenignClient):
@@ -102,6 +128,18 @@ class GaussianNoiseClient(MaliciousClientBase):
     first-order marginal scale as global weights but destroys parameter structure,
     which is typically harder to flag than fixed global noise strength.
     """
+
+    def local_step(
+        self,
+        global_state_dict: Dict[str, Tensor],
+        reference_state_dict: Optional[Dict[str, Tensor]] = None,
+    ) -> Dict[str, Tensor]:
+        if not self.config.skip_redundant_attack_training:
+            return super().local_step(global_state_dict, reference_state_dict)
+        # The Gaussian upload depends only on the global model. Training a local
+        # model first cannot affect the returned state and wastes a full epoch.
+        reference = reference_state_dict or global_state_dict
+        return self._postprocess_upload(reference, reference)
 
     def _postprocess_upload(
         self,
@@ -212,6 +250,17 @@ class LieAttackClient(MaliciousClientBase):
     after collecting all client updates.
     """
 
+    def local_step(
+        self,
+        global_state_dict: Dict[str, Tensor],
+        reference_state_dict: Optional[Dict[str, Tensor]] = None,
+    ) -> Dict[str, Tensor]:
+        if not self.config.skip_redundant_attack_training:
+            return super().local_step(global_state_dict, reference_state_dict)
+        # _apply_lie_attack replaces every malicious upload after benign updates
+        # are collected, so local SGD here has no observable effect.
+        return reference_state_dict or global_state_dict
+
 
 ATTACK_REGISTRY: Dict[str, Type[BaseClient]] = {
     "gn": GaussianNoiseClient,
@@ -220,4 +269,3 @@ ATTACK_REGISTRY: Dict[str, Type[BaseClient]] = {
     "bd": BackdoorClient,
     "lie": LieAttackClient,
 }
-

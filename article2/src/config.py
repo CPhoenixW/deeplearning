@@ -50,6 +50,16 @@ class FedConfig:
     local_epochs: int = 1
     batch_size: int = 64
     num_workers: int = 0
+    # CUDA execution knobs. Matrix runs expose the same switches independently;
+    # AMP/channels-last are workload-dependent and remain opt-in by default.
+    use_amp: bool = False
+    channels_last: bool = False
+    cuda_aggregation: bool = False
+    reuse_client_model: bool = False
+    skip_redundant_attack_training: bool = False
+    # Full update-vector diagnostics are useful interactively but expensive:
+    # they repeatedly scan every client's complete model on CPU.
+    round_diagnostics: bool = True
 
     # --- Attack params ---
     # Gaussian noise attack: per-tensor N(μ, (scale·σ)²) where μ=mean(W), σ=std(W) on global weights;
@@ -77,6 +87,24 @@ class FedConfig:
     ae_lr: float = 1e-3
     ae_weight_decay: float = 1e-6
     ae_grad_clip: float = 1.0
+    # Input representation used by AE-SVDD before robust feature scaling:
+    # - "absolute": task-specific features extracted from each uploaded client model.
+    # - "delta": the same features extracted from (client model - pre-round global model).
+    #
+    # With the current per-round coordinate-wise median/MAD centering, these two
+    # modes are translation-equivalent for linear parameter extractors.  The option
+    # is retained explicitly so that this equivalence can be tested and so future
+    # scaling strategies can compare the two representations without code changes.
+    svdd_input_mode: str = "absolute"
+    # Feature interface before AE-SVDD:
+    # - "task": existing task-specific BN / LayerNorm descriptor.
+    # - "fixed_projection": fixed hierarchical multi-view Phi(delta W).
+    svdd_feature_mode: str = "task"
+    param_descriptor_dim: int = 4096
+    param_descriptor_seed: int = 2027
+    # "cpu" is deterministic; "cuda" is faster but scatter reductions can have
+    # small floating-point ordering differences. "auto" follows the run device.
+    param_descriptor_device: str = "cpu"
 
     # --- Phase schedule ---
     phase1_rounds: int = 15
@@ -103,6 +131,17 @@ class FedConfig:
     alignins_lambda_c: float = 1.0
     # BNGuard: BN-feature L2 distance from median + tau * MAD
     bnguard_tau: float = 3.0
+    # FLGMM: 1-D GMM over local-vs-temporary-global distances + SPC upper limit.
+    flgmm_warmup_rounds: int = 50
+    flgmm_control_l: float = 3.0
+    flgmm_em_iters: int = 50
+    # FLANDERS: Matrix autoregressive prediction over sampled parameter time series.
+    flanders_window: int = 5
+    flanders_sampling: int = 500
+    flanders_maxiter: int = 100
+    flanders_alpha: float = 1.0
+    flanders_beta: float = 1.0
+    flanders_num_clients_to_keep: int | None = None
 
     # --- SVDD ---
     svdd_warmup_rounds: int = 100
@@ -163,6 +202,26 @@ class MatrixRunConfig:
     data_root: str | None = None
     local_epochs: int = 1
     num_workers: int | None = None
+    use_amp: bool = False
+    channels_last: bool = False
+    cuda_aggregation: bool = True
+    reuse_client_model: bool = True
+    skip_redundant_attack_training: bool = True
+    round_diagnostics: bool = False
+    svdd_input_mode: str | None = None
+    svdd_feature_mode: str | None = None
+    param_descriptor_dim: int | None = None
+    param_descriptor_seed: int | None = None
+    param_descriptor_device: str | None = None
+    flgmm_warmup_rounds: int | None = None
+    flgmm_control_l: float | None = None
+    flgmm_em_iters: int | None = None
+    flanders_window: int | None = None
+    flanders_sampling: int | None = None
+    flanders_maxiter: int | None = None
+    flanders_alpha: float | None = None
+    flanders_beta: float | None = None
+    flanders_num_clients_to_keep: int | None = None
     # ``None`` 表示不覆盖 ``FedConfig`` 默认（例如 dirichlet）。
     dirichlet_alpha: float | None = None
     seed: int = 42
@@ -207,6 +266,7 @@ DEFENSE_ALIASES: dict[str, str] = {
     "fl_defender": "fld",
     "align_ins": "alignins",
     "bn_guard": "bnguard",
+    "fl_gmm": "flgmm",
 }
 
 

@@ -79,10 +79,50 @@ def build_bn_matrix(client_state_dicts: Iterable[Dict[str, Tensor]]) -> Tensor:
 def build_svdd_feature_matrix(
     client_state_dicts: Iterable[Dict[str, Tensor]],
     extract_fn: Callable[[Dict[str, Tensor]], Tensor],
+    *,
+    input_mode: str = "absolute",
+    reference_state_dict: Dict[str, Tensor] | None = None,
 ) -> Tensor:
-    """Stack per-client SVDD feature rows using a task-specific extractor."""
+    """Stack per-client SVDD feature rows using a task-specific extractor.
 
-    feat_list: List[Tensor] = [extract_fn(sd) for sd in client_state_dicts]
+    ``absolute`` extracts features directly from each client model. ``delta``
+    first subtracts the pre-round global model from every floating-point entry,
+    then applies the same extractor.  Non-floating buffers are copied unchanged;
+    the current extractors only consume floating-point parameters/statistics.
+    """
+
+    mode = input_mode.lower().strip()
+    if mode not in {"absolute", "delta"}:
+        raise ValueError(
+            f"Unknown SVDD input_mode {input_mode!r}. Use 'absolute' or 'delta'."
+        )
+    if mode == "delta" and reference_state_dict is None:
+        raise ValueError("reference_state_dict is required when input_mode='delta'.")
+
+    feat_list: List[Tensor] = []
+    for sd in client_state_dicts:
+        feature_sd = sd
+        if mode == "delta":
+            assert reference_state_dict is not None
+            if sd.keys() != reference_state_dict.keys():
+                raise ValueError("Client and reference state_dict keys do not match.")
+            feature_sd = {}
+            for key, client_value in sd.items():
+                reference_value = reference_state_dict[key]
+                if client_value.shape != reference_value.shape:
+                    raise ValueError(
+                        f"State shape mismatch for {key!r}: "
+                        f"{tuple(client_value.shape)} vs {tuple(reference_value.shape)}."
+                    )
+                client_cpu = client_value.detach().cpu()
+                reference_cpu = reference_value.detach().cpu()
+                if client_cpu.is_floating_point():
+                    feature_sd[key] = (
+                        client_cpu.float() - reference_cpu.float()
+                    ).to(dtype=client_cpu.dtype)
+                else:
+                    feature_sd[key] = client_cpu.clone()
+        feat_list.append(extract_fn(feature_sd))
     return torch.stack(feat_list, dim=0)
 
 
@@ -117,7 +157,12 @@ def robust_zscore(x: Tensor) -> Tensor:
     return (x - med) / m
 
 
-def weighted_fedavg(client_state_dicts: List[Dict[str, Tensor]], alpha: Tensor) -> Dict[str, Tensor]:
+def weighted_fedavg(
+    client_state_dicts: List[Dict[str, Tensor]],
+    alpha: Tensor,
+    *,
+    device: torch.device | str | None = None,
+) -> Dict[str, Tensor]:
     """Weighted FedAvg aggregation over client state_dicts."""
 
     if len(client_state_dicts) == 0:
@@ -125,33 +170,46 @@ def weighted_fedavg(client_state_dicts: List[Dict[str, Tensor]], alpha: Tensor) 
     if alpha.ndim != 1 or alpha.numel() != len(client_state_dicts):
         raise ValueError("alpha must be 1D with length K.")
 
-    device = client_state_dicts[0][next(iter(client_state_dicts[0]))].device
-    alpha = alpha.to(device)
+    aggregation_device = (
+        torch.device(device)
+        if device is not None
+        else client_state_dicts[0][next(iter(client_state_dicts[0]))].device
+    )
+    alpha = alpha.to(aggregation_device, non_blocking=True)
 
     keys = client_state_dicts[0].keys()
     agg: Dict[str, Tensor] = {}
     for k in keys:
-        stacked = torch.stack([sd[k].to(device) for sd in client_state_dicts], dim=0)
+        stacked = torch.stack(
+            [sd[k].to(aggregation_device, non_blocking=True) for sd in client_state_dicts],
+            dim=0,
+        )
         # reshape alpha for broadcasting
         w = alpha.view(-1, *([1] * (stacked.ndim - 1)))
         agg[k] = (w * stacked).sum(dim=0)
     return agg
 
 
-def aggregate_fedavg(client_state_dicts: List[Dict[str, Tensor]]) -> Dict[str, Tensor]:
+def aggregate_fedavg(
+    client_state_dicts: List[Dict[str, Tensor]],
+    *,
+    device: torch.device | str | None = None,
+) -> Dict[str, Tensor]:
     """Uniform FedAvg aggregation."""
 
     if len(client_state_dicts) == 0:
         raise ValueError("No client state_dicts provided.")
     k = len(client_state_dicts)
     alpha = torch.full((k,), 1.0 / k)
-    return weighted_fedavg(client_state_dicts, alpha)
+    return weighted_fedavg(client_state_dicts, alpha, device=device)
 
 
 def aggregate_trimmed_mean(
     client_state_dicts: List[Dict[str, Tensor]],
     trim_ratio: float = 0.2,
     num_byzantine: int | None = None,
+    *,
+    device: torch.device | str | None = None,
 ) -> Dict[str, Tensor]:
     """Coordinate-wise Trimmed Mean aggregation.
 
@@ -178,16 +236,24 @@ def aggregate_trimmed_mean(
         trim_k = int(num_byzantine)
 
     keys = client_state_dicts[0].keys()
+    aggregation_device = (
+        torch.device(device)
+        if device is not None
+        else client_state_dicts[0][next(iter(client_state_dicts[0]))].device
+    )
     agg: Dict[str, Tensor] = {}
     for key in keys:
         tensors = [sd[key] for sd in client_state_dicts]
         ref = tensors[0]
         # Keep non-floating tensors unchanged to preserve dtype (e.g. num_batches_tracked).
         if not ref.is_floating_point():
-            agg[key] = ref.detach().clone()
+            agg[key] = ref.detach().to(aggregation_device, non_blocking=True).clone()
             continue
 
-        stacked = torch.stack([t.detach().float() for t in tensors], dim=0)
+        stacked = torch.stack(
+            [t.detach().to(aggregation_device, non_blocking=True).float() for t in tensors],
+            dim=0,
+        )
         if trim_k == 0:
             agg[key] = stacked.mean(dim=0).to(ref.dtype)
             continue
@@ -198,11 +264,17 @@ def aggregate_trimmed_mean(
     return agg
 
 
-def _flatten_floating_params(state_dict: Dict[str, Tensor]) -> Tensor:
+def _flatten_floating_params(
+    state_dict: Dict[str, Tensor],
+    device: torch.device | str | None = None,
+) -> Tensor:
     parts: List[Tensor] = []
     for _, value in state_dict.items():
         if value.is_floating_point():
-            parts.append(value.detach().float().reshape(-1))
+            value = value.detach()
+            if device is not None:
+                value = value.to(device, non_blocking=True)
+            parts.append(value.float().reshape(-1))
     if not parts:
         raise ValueError("No floating-point parameters found in state_dict.")
     return torch.cat(parts, dim=0)
@@ -211,6 +283,8 @@ def _flatten_floating_params(state_dict: Dict[str, Tensor]) -> Tensor:
 def compute_multi_krum_scores(
     client_state_dicts: List[Dict[str, Tensor]],
     num_byzantine: int,
+    *,
+    device: torch.device | str | None = None,
 ) -> Tensor:
     """Compute per-client Multi-Krum scores.
 
@@ -224,13 +298,16 @@ def compute_multi_krum_scores(
     if n <= 2 * num_byzantine + 2:
         raise ValueError("Multi-Krum requires n > 2 * num_byzantine + 2.")
 
-    updates = torch.stack([_flatten_floating_params(sd) for sd in client_state_dicts], dim=0)  # (n, d)
+    updates = torch.stack(
+        [_flatten_floating_params(sd, device=device) for sd in client_state_dicts],
+        dim=0,
+    )  # (n, d)
     sq_norms = (updates * updates).sum(dim=1, keepdim=True)
     distances = sq_norms + sq_norms.t() - 2.0 * (updates @ updates.t())
     distances = distances.clamp_min(0.0)
 
     neighbors = n - num_byzantine - 2
-    scores = torch.empty(n, dtype=distances.dtype)
+    scores = torch.empty(n, dtype=distances.dtype, device=distances.device)
     for i in range(n):
         d_i = distances[i]
         others = torch.cat([d_i[:i], d_i[i + 1 :]], dim=0)
@@ -243,6 +320,8 @@ def aggregate_multi_krum(
     client_state_dicts: List[Dict[str, Tensor]],
     num_byzantine: int,
     num_selected: int | None = None,
+    *,
+    device: torch.device | str | None = None,
 ) -> Dict[str, Tensor]:
     """Multi-Krum aggregation.
 
@@ -258,7 +337,11 @@ def aggregate_multi_krum(
     if n <= 2 * num_byzantine + 2:
         raise ValueError("Multi-Krum requires n > 2 * num_byzantine + 2.")
 
-    scores = compute_multi_krum_scores(client_state_dicts, num_byzantine=num_byzantine)
+    scores = compute_multi_krum_scores(
+        client_state_dicts,
+        num_byzantine=num_byzantine,
+        device=device,
+    )
     m = n - num_byzantine - 2
     if num_selected is None:
         num_selected = m
@@ -266,7 +349,7 @@ def aggregate_multi_krum(
 
     selected = torch.topk(scores, k=num_selected, largest=False).indices
     selected_sds = [client_state_dicts[int(idx)] for idx in selected.tolist()]
-    return aggregate_fedavg(selected_sds)
+    return aggregate_fedavg(selected_sds, device=device)
 
 
 def aggregate_updates(
@@ -276,23 +359,26 @@ def aggregate_updates(
     trim_ratio: float = 0.2,
     num_byzantine: int = 0,
     num_selected: int | None = None,
+    device: torch.device | str | None = None,
 ) -> Dict[str, Tensor]:
     """Unified aggregation interface for FedAvg / Trimmed Mean / Multi-Krum."""
 
     method_norm = method.lower().strip()
     if method_norm == "fedavg":
-        return aggregate_fedavg(client_state_dicts)
+        return aggregate_fedavg(client_state_dicts, device=device)
     if method_norm == "trimmed_mean":
         return aggregate_trimmed_mean(
             client_state_dicts,
             trim_ratio=trim_ratio,
             num_byzantine=num_byzantine if num_byzantine > 0 else None,
+            device=device,
         )
     if method_norm == "multi_krum":
         return aggregate_multi_krum(
             client_state_dicts,
             num_byzantine=num_byzantine,
             num_selected=num_selected,
+            device=device,
         )
     raise ValueError(
         f"Unknown aggregation method: {method}. "
@@ -307,6 +393,7 @@ def aggregate_updates_with_info(
     trim_ratio: float = 0.2,
     num_byzantine: int = 0,
     num_selected: int | None = None,
+    device: torch.device | str | None = None,
 ) -> tuple[Dict[str, Tensor], Tensor, Tensor]:
     """Aggregation with client-level participation info.
 
@@ -323,7 +410,7 @@ def aggregate_updates_with_info(
     method_norm = method.lower().strip()
     if method_norm == "fedavg":
         alpha = torch.full((n,), 1.0 / n)
-        return aggregate_fedavg(client_state_dicts), torch.ones(n), alpha
+        return aggregate_fedavg(client_state_dicts, device=device), torch.ones(n), alpha
 
     if method_norm == "trimmed_mean":
         # Coordinate-wise trimmed mean has no unique client-level reject mask.
@@ -333,6 +420,7 @@ def aggregate_updates_with_info(
                 client_state_dicts,
                 trim_ratio=trim_ratio,
                 num_byzantine=num_byzantine if num_byzantine > 0 else None,
+                device=device,
             ),
             torch.ones(n),
             alpha,
@@ -344,23 +432,27 @@ def aggregate_updates_with_info(
         if n <= 2 * num_byzantine + 2:
             raise ValueError("Multi-Krum requires n > 2 * num_byzantine + 2.")
 
-        scores = compute_multi_krum_scores(client_state_dicts, num_byzantine=num_byzantine)
+        scores = compute_multi_krum_scores(
+            client_state_dicts,
+            num_byzantine=num_byzantine,
+            device=device,
+        )
         m = n - num_byzantine - 2
         if num_selected is None:
             num_selected = m
         num_selected = max(1, min(num_selected, n))
 
         selected = torch.topk(scores, k=num_selected, largest=False).indices
+        selected_cpu = selected.detach().cpu()
         m_mask = torch.zeros(n)
-        m_mask[selected] = 1.0
+        m_mask[selected_cpu] = 1.0
         alpha = m_mask / m_mask.sum()
 
-        selected_sds = [client_state_dicts[int(idx)] for idx in selected.tolist()]
-        global_sd = aggregate_fedavg(selected_sds)
+        selected_sds = [client_state_dicts[int(idx)] for idx in selected_cpu.tolist()]
+        global_sd = aggregate_fedavg(selected_sds, device=device)
         return global_sd, m_mask, alpha
 
     raise ValueError(
         f"Unknown aggregation method: {method}. "
         "Expected one of ['fedavg', 'trimmed_mean', 'multi_krum']."
     )
-
