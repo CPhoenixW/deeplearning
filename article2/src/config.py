@@ -41,6 +41,9 @@ class FedConfig:
     multi_krum_num_selected: int | None = None
     # --- Attack type (short IDs: gn, lf, sf, bd, lie; long names still accepted) ---
     attack_type: str = "bd"
+    # Comma-separated attack IDs assigned deterministically across malicious
+    # clients for the mixed-attack experiment (e.g. ``lf,bd,gn,lie``).
+    mixed_attack_types: str = "lf,bd,gn"
 
     # --- Client training ---
     client_lr: float = 0.1
@@ -145,6 +148,19 @@ class FedConfig:
     flanders_alpha: float = 1.0
     flanders_beta: float = 1.0
     flanders_num_clients_to_keep: int | None = None
+    # FedDMC-style data-free multi-view malicious-client detector.  The
+    # detector fuses magnitude, direction, sign, sparsity and temporal
+    # consistency instead of assuming a particular attack family.
+    dmc_warmup_rounds: int = 3
+    dmc_tau: float = 3.0
+    dmc_ema_decay: float = 0.8
+    dmc_min_keep: int = 1
+    dmc_norm_weight: float = 1.0
+    dmc_direction_weight: float = 1.0
+    dmc_sign_weight: float = 1.0
+    dmc_sparsity_weight: float = 0.5
+    dmc_temporal_weight: float = 1.0
+    dmc_score_ema_decay: float = 0.7
 
     # --- SVDD ---
     svdd_warmup_rounds: int = 100
@@ -226,6 +242,16 @@ class MatrixRunConfig:
     flanders_alpha: float | None = None
     flanders_beta: float | None = None
     flanders_num_clients_to_keep: int | None = None
+    dmc_warmup_rounds: int | None = None
+    dmc_tau: float | None = None
+    dmc_ema_decay: float | None = None
+    dmc_min_keep: int | None = None
+    dmc_norm_weight: float | None = None
+    dmc_direction_weight: float | None = None
+    dmc_sign_weight: float | None = None
+    dmc_sparsity_weight: float | None = None
+    dmc_temporal_weight: float | None = None
+    dmc_score_ema_decay: float | None = None
     # ``None`` 表示不覆盖 ``FedConfig`` 默认（例如 dirichlet）。
     dirichlet_alpha: float | None = None
     seed: int = 42
@@ -257,6 +283,9 @@ def load_matrix_run_config(path: str | Path | None = None) -> MatrixRunConfig:
 ATTACK_ALIASES: dict[str, str] = {
     "none": "none",
     "no_attack": "none",
+    "mix": "mix",
+    "mixed": "mix",
+    "hybrid": "mix",
     "gaussian_noise": "gn",
     "label_flipping": "lf",
     "sign_flipping": "sf",
@@ -273,6 +302,11 @@ DEFENSE_ALIASES: dict[str, str] = {
     "align_ins": "alignins",
     "bn_guard": "bnguard",
     "fl_gmm": "flgmm",
+    "feddmc": "dmc",
+    "fed_dmc": "dmc",
+    "fed-dmc": "dmc",
+    "multi_view": "dmc",
+    "multiview": "dmc",
 }
 
 

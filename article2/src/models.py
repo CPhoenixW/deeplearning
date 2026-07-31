@@ -30,6 +30,12 @@ def resnet18_fashion_mnist(num_classes: int = 10) -> nn.Module:
     return model
 
 
+def resnet18_mnist(num_classes: int = 10) -> nn.Module:
+    """ResNet18 for 32x32 grayscale MNIST images."""
+
+    return resnet18_fashion_mnist(num_classes=num_classes)
+
+
 def build_resnet18(num_classes: int = 10) -> nn.Module:
     """Backward-compatible alias: same as ``resnet18_cifar10``."""
 
@@ -176,4 +182,3 @@ class AutoEncoder(nn.Module):
         """Encode input into latent representation."""
 
         return self.encoder(x)
-

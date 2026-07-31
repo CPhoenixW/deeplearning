@@ -15,6 +15,7 @@ Typical invocation::
 
     python -m src.run_matrix --list
     python -m src.run_matrix --task ag_news --defenses svdd --rounds 50
+    python -m src.run_silent --task cifar10 --attacks none,gn,lf,sf,lie,bd --defenses dmc --rounds 50
 """
 
 __all__: list[str] = []

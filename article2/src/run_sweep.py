@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 try:
-    from .clients import ATTACK_REGISTRY
+    from .clients import ATTACK_REGISTRY, mixed_attack_for_client
     from .config import (
         FedConfig,
         normalize_attack_name,
@@ -35,7 +35,7 @@ try:
     from .server import DEFENSE_REGISTRY
     from .tasks import TASK_REGISTRY, get_task
 except ImportError:  # pragma: no cover - supports ``python src/run_sweep.py``
-    from clients import ATTACK_REGISTRY
+    from clients import ATTACK_REGISTRY, mixed_attack_for_client
     from config import FedConfig, normalize_attack_name, normalize_defense_name, project_root
     from main import run_federated
     from server import DEFENSE_REGISTRY
@@ -159,7 +159,12 @@ def _validate(tasks: Iterable[str], attacks: Iterable[str], defenses: Iterable[s
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run paired federated-learning experiment sweeps.")
     parser.add_argument("--tasks", default="cifar10")
-    parser.add_argument("--attacks", default="none,lf,gn,sf,lie,bd")
+    parser.add_argument("--attacks", default="none,lf,gn,sf,lie,bd,mix")
+    parser.add_argument(
+        "--mixed-attack-types",
+        default="lf,bd,gn",
+        help="Comma-separated attack IDs assigned round-robin to malicious clients when --attacks includes mix.",
+    )
     parser.add_argument("--defenses", default="avg,tm,mk,svdd")
     parser.add_argument("--clients", default="10")
     parser.add_argument("--rates", default="0.1,0.2,0.3")
@@ -218,6 +223,7 @@ def main() -> None:
     base.reuse_client_model = True
     base.skip_redundant_attack_training = True
     base.phase1_selection = args.phase1_selection
+    base.mixed_attack_types = args.mixed_attack_types
 
     # Cache partitions by task/clients/alpha/seed.  Attacks and defenses share
     # exactly the same client data and hence produce paired comparisons.
@@ -250,6 +256,11 @@ def main() -> None:
                 "task_name": task_name, "attack": attack, "defense": defense,
                 "num_clients": k, "num_benign": num_benign,
                 "malicious_rate": effective_rate, "requested_rate": rate, "dirichlet_alpha": alpha,
+                "mixed_attack_types": cfg.mixed_attack_types,
+                "mixed_attack_assignments": (
+                    {str(cid): mixed_attack_for_client(cfg, cid) for cid in range(cfg.num_benign, cfg.num_clients)}
+                    if attack == "mix" else {}
+                ),
                 "seed": seed, "total_rounds": args.rounds,
                 "device": args.device, "started_at": started,
                 "finished_at": datetime.now().astimezone().isoformat(timespec="seconds"),

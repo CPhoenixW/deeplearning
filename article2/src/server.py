@@ -1197,6 +1197,208 @@ class FLANDERSServer(BaseServer):
         )
 
 
+class FedDMCServer(BaseServer):
+    """Data-free multi-view malicious-client detection (FedDMC-style).
+
+    FedDMC (Mu et al., IEEE TDSC) motivates combining client behaviour
+    statistics, anomaly detection and dynamic trust rather than designing a
+    detector for one backdoor signature.  This implementation keeps the
+    server data-free and dependency-free:
+
+    * **magnitude**: robust z-score of the update norm;
+    * **direction**: disagreement with the coordinate-wise median update;
+    * **sign**: disagreement with the majority sign on update coordinates;
+    * **sparsity**: abnormal fraction of changed coordinates;
+    * **temporal behaviour**: deviation from each client's EMA descriptor.
+
+    The views are fused into a non-negative anomaly score.  A median/MAD
+    threshold creates a hard isolation mask after a short warm-up, while
+    ``1 / (1 + score)`` gives the remaining clients dynamic aggregation
+    weights.  It therefore handles noise, sign/label/model poisoning, LIE and
+    backdoor uploads without a root/validation dataset or attack labels.
+    """
+
+    defense_name = "dmc"
+
+    def __init__(
+        self,
+        config: FedConfig,
+        d_bn: int,
+        device: torch.device,
+        model_fn: Callable[[], nn.Module],
+    ) -> None:
+        super().__init__(config, d_bn, device, model_fn)
+        self._raw_ema: Optional[Tensor] = None
+        self._score_ema: Optional[Tensor] = None
+
+    @staticmethod
+    def _robust_z(values: Tensor) -> Tensor:
+        """Absolute median/MAD z-score, finite and stable for constant rows."""
+        values = torch.nan_to_num(values.float(), nan=0.0, posinf=1e6, neginf=-1e6)
+        med = values.median()
+        mad = (values - med).abs().median()
+        # 1.4826 makes MAD comparable to std for a Gaussian; the floor also
+        # prevents a single outlier from producing NaN/Inf on small batches.
+        scale = torch.clamp(1.4826 * mad, min=1e-6)
+        return ((values - med).abs() / scale).clamp(max=1e6)
+
+    def _views(self, deltas: Tensor) -> Tensor:
+        """Return (clients, 5) robust anomaly views from (clients, params)."""
+        k, d = deltas.shape
+        finite = torch.isfinite(deltas).all(dim=1)
+        safe = torch.nan_to_num(deltas.float(), nan=0.0, posinf=0.0, neginf=0.0)
+
+        # Coordinate-wise median is translation-free and avoids O(K^2) pair
+        # matrices, which matters for large models.
+        center = safe.median(dim=0).values
+        center_norm = center.norm().clamp_min(1e-12)
+        norms = safe.norm(dim=1)
+        norm_view = self._robust_z(norms)
+
+        dot = safe @ center
+        cos = dot / (safe.norm(dim=1).clamp_min(1e-12) * center_norm)
+        direction_view = self._robust_z(1.0 - cos.clamp(-1.0, 1.0))
+
+        # Ignore coordinates where the median sign is zero; this avoids
+        # rewarding all-zero coordinates in sparse or frozen layers.
+        sign_center = torch.sign(safe.sum(dim=0))
+        active = sign_center != 0
+        if bool(active.any()):
+            signs = torch.sign(safe[:, active])
+            sign_agreement = (signs * sign_center[active]).mean(dim=1)
+            sign_view = self._robust_z(1.0 - sign_agreement)
+        else:
+            sign_view = torch.zeros(k, dtype=torch.float32)
+
+        nonzero = (safe.abs() > 1e-12).float().mean(dim=1)
+        sparsity_view = self._robust_z(nonzero)
+
+        raw_sign = 1.0 - sign_agreement if bool(active.any()) else torch.zeros(k)
+        raw = torch.stack([norms, 1.0 - cos, raw_sign, nonzero], dim=1)
+        raw = torch.nan_to_num(raw, nan=0.0, posinf=1e6, neginf=0.0)
+        if self._raw_ema is None or self._raw_ema.shape != raw.shape:
+            temporal_view = torch.zeros(k, dtype=torch.float32)
+            self._raw_ema = raw.detach().clone()
+        else:
+            temporal_raw = (raw - self._raw_ema).abs().mean(dim=1)
+            temporal_view = self._robust_z(temporal_raw)
+            decay = float(np.clip(getattr(self.config, "dmc_ema_decay", 0.8), 0.0, 1.0))
+            self._raw_ema = decay * self._raw_ema + (1.0 - decay) * raw.detach()
+
+        views = torch.stack(
+            [norm_view, direction_view, sign_view, sparsity_view, temporal_view], dim=1
+        )
+        views[~finite] = 1e6
+        return torch.nan_to_num(views, nan=0.0, posinf=1e6, neginf=0.0)
+
+    def aggregate(self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]) -> RoundStats:
+        k = len(client_state_dicts)
+        if k == 0:
+            raise ValueError("FedDMC requires at least one client update")
+        global_sd = self.state_dict_for_clients()
+        deltas = torch.stack(
+            [_flatten_param_delta(global_sd, sd, self.param_names) for sd in client_state_dicts], dim=0
+        ).float()
+        valid_rows = torch.isfinite(deltas).all(dim=1)
+        views = self._views(deltas)
+
+        weights = torch.tensor(
+            [
+                float(getattr(self.config, "dmc_norm_weight", 1.0)),
+                float(getattr(self.config, "dmc_direction_weight", 1.0)),
+                float(getattr(self.config, "dmc_sign_weight", 1.0)),
+                float(getattr(self.config, "dmc_sparsity_weight", 0.5)),
+                float(getattr(self.config, "dmc_temporal_weight", 1.0)),
+            ], dtype=torch.float32
+        ).clamp_min(0.0)
+        if float(weights.sum().item()) <= 0.0:
+            weights.fill_(1.0)
+        weights = weights / weights.sum()
+        score = (views * weights.view(1, -1)).sum(dim=1)
+
+        score_decay = float(np.clip(getattr(self.config, "dmc_score_ema_decay", 0.7), 0.0, 1.0))
+        if self._score_ema is None or self._score_ema.numel() != k:
+            self._score_ema = score.detach().clone()
+        else:
+            self._score_ema = score_decay * self._score_ema + (1.0 - score_decay) * score.detach()
+        score = self._score_ema.clone()
+
+        warmup = max(0, int(getattr(self.config, "dmc_warmup_rounds", 3)))
+        tau = max(0.0, float(getattr(self.config, "dmc_tau", 3.0)))
+        med = score.median()
+        mad = (score - med).abs().median()
+        threshold = med + tau * max(float(1.4826 * mad.item()), 1e-6)
+        m = torch.ones(k, dtype=torch.float32)
+        if round_idx > warmup and float(mad.item()) > 1e-8:
+            m = (score <= threshold).float()
+        # Non-finite uploads are never trusted, even when the robust spread is
+        # degenerate (for example, a two-client round with one NaN row).
+        m[~valid_rows] = 0.0
+        # Never let a degenerate batch discard every participant; keep the
+        # lowest-scoring clients as a deterministic safety fallback.
+        min_keep = max(1, min(k, int(getattr(self.config, "dmc_min_keep", 1))))
+        if int(m.sum().item()) < min_keep:
+            m.zero_()
+            valid_idx = torch.where(valid_rows)[0]
+            if valid_idx.numel() > 0:
+                keep_idx = valid_idx[torch.argsort(score[valid_idx])[:min_keep]]
+            else:
+                # If every upload is invalid, weighted_fedavg still receives a
+                # finite fallback after _views() sanitization; mark the first
+                # slot to keep the mask/alpha contract well-defined.
+                keep_idx = torch.argsort(score)[:min_keep]
+            m[keep_idx] = 1.0
+
+        trust = 1.0 / (1.0 + score.clamp_min(0.0))
+        trust = trust * m
+        if float(trust.sum().item()) <= 1e-12:
+            trust = m.clone()
+        alpha = trust / trust.sum().clamp_min(1e-12)
+
+        # Avoid ``0 * NaN`` poisoning the weighted average.  Invalid uploads
+        # are replaced by the pre-round global snapshot; their mask is zero
+        # whenever at least one valid client exists.
+        aggregation_sds: List[Dict[str, Tensor]] = []
+        for row_valid, sd in zip(valid_rows.tolist(), client_state_dicts):
+            if row_valid:
+                aggregation_sds.append(sd)
+                continue
+            cleaned: Dict[str, Tensor] = {}
+            for name, g in global_sd.items():
+                value = sd[name].detach().cpu()
+                if value.is_floating_point():
+                    cleaned[name] = torch.where(
+                        torch.isfinite(value), value, g.detach().cpu()
+                    ).clone()
+                else:
+                    cleaned[name] = g.detach().cpu().clone()
+            aggregation_sds.append(cleaned)
+        global_sd_new = weighted_fedavg(
+            aggregation_sds, alpha.detach().cpu(), device=self.aggregation_device
+        )
+        self.global_model.load_state_dict(global_sd_new)
+        kept = int(m.sum().item())
+        phase = "dmc | Warm-up" if round_idx <= warmup else "dmc | Multi-view Filtering"
+        return RoundStats(
+            center_norm=float("nan"),
+            z_var=float(torch.var(score).item()) if k > 1 else 0.0,
+            ae_loss=float("nan"),
+            svdd_loss=float("nan"),
+            d=score.detach().cpu(),
+            m=m.detach().cpu(),
+            alpha=alpha.detach().cpu(),
+            phase=phase,
+            show_detection=True,
+            monitor_items=[
+                ("Defense", "FedDMC (multi-view)"),
+                ("Score threshold", f"{threshold:.4f}"),
+                ("Kept clients", f"{kept}/{k}"),
+                ("Views", "norm+direction+sign+sparsity+temporal"),
+                ("Score avg", f"{float(score.mean().item()):.4f}"),
+            ],
+        )
+
+
 class FedAvgServer(BaseServer):
     defense_name = "avg"
 
@@ -1674,6 +1876,7 @@ DEFENSE_REGISTRY: Dict[str, Type[BaseServer]] = {
     "bnguard": BNGuardServer,
     "flgmm": FLGMMServer,
     "flanders": FLANDERSServer,
+    "dmc": FedDMCServer,
 }
 
 # Backward compatibility

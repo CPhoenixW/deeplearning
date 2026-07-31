@@ -262,11 +262,46 @@ class LieAttackClient(MaliciousClientBase):
         return reference_state_dict or global_state_dict
 
 
+def mixed_attack_for_client(config: FedConfig, client_id: int) -> str:
+    """Return the deterministic attack assigned to a mixed-attack client."""
+    raw = str(getattr(config, "mixed_attack_types", "lf,bd,gn"))
+    attack_ids = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    attack_ids = [item for item in attack_ids if item not in {"none", "mix"}]
+    if not attack_ids:
+        raise ValueError("mixed_attack_types must contain at least one non-empty attack id.")
+    return attack_ids[(int(client_id) - int(config.num_benign)) % len(attack_ids)]
+
+
+class MixedAttackClient(MaliciousClientBase):
+    """Deterministically compose different attacks across malicious clients.
+
+    A mixed run is intentionally client-composed rather than round-random: it
+    allows the evaluator to attribute detection errors to a known attack family
+    while still exercising simultaneous LF/backdoor/model-poisoning traffic.
+    LIE clients are rewritten centrally after all benign updates are collected.
+    """
+
+    def __init__(self, client_id, device, config, loader, model_fn) -> None:
+        super().__init__(client_id, device, config, loader, model_fn)
+        self.attack_id = mixed_attack_for_client(config, client_id)
+        attack_cls = ATTACK_REGISTRY.get(self.attack_id)
+        if attack_cls is None or self.attack_id == "mix":
+            raise ValueError(
+                f"Unknown mixed attack {self.attack_id!r}; "
+                f"available: {sorted(ATTACK_REGISTRY)}"
+            )
+        self.delegate = attack_cls(client_id, device, config, loader, model_fn)
+
+    def local_step(self, global_state_dict, reference_state_dict=None):
+        return self.delegate.local_step(global_state_dict, reference_state_dict)
+
+
 ATTACK_REGISTRY: Dict[str, Type[BaseClient]] = {
     # Explicit clean baseline.  The sweep runner also forces all clients to be
     # benign for this attack id, so detection metrics are not contaminated by
     # synthetic malicious labels.
     "none": BenignClient,
+    "mix": MixedAttackClient,
     "gn": GaussianNoiseClient,
     "lf": LabelFlippingClient,
     "sf": SignFlippingClient,

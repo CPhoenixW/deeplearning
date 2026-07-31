@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Sequence
 
 try:
-    from .clients import ATTACK_REGISTRY
+    from .clients import ATTACK_REGISTRY, mixed_attack_for_client
     from .config import (
         ATTACK_ALIASES,
         DEFENSE_ALIASES,
@@ -22,7 +22,7 @@ try:
     from .server import DEFENSE_REGISTRY
     from .tasks import TASK_REGISTRY, get_task
 except ImportError:
-    from clients import ATTACK_REGISTRY
+    from clients import ATTACK_REGISTRY, mixed_attack_for_client
     from config import (
         ATTACK_ALIASES,
         DEFENSE_ALIASES,
@@ -140,6 +140,21 @@ def run_one_combo(
             "param_descriptor_dim": cfg.param_descriptor_dim,
             "param_descriptor_seed": cfg.param_descriptor_seed,
             "param_descriptor_device": cfg.param_descriptor_device,
+            "mixed_attack_types": cfg.mixed_attack_types,
+            "mixed_attack_assignments": (
+                {str(cid): mixed_attack_for_client(cfg, cid) for cid in range(cfg.num_benign, cfg.num_clients)}
+                if attack_id == "mix" else {}
+            ),
+            "dmc_warmup_rounds": cfg.dmc_warmup_rounds,
+            "dmc_tau": cfg.dmc_tau,
+            "dmc_ema_decay": cfg.dmc_ema_decay,
+            "dmc_min_keep": cfg.dmc_min_keep,
+            "dmc_norm_weight": cfg.dmc_norm_weight,
+            "dmc_direction_weight": cfg.dmc_direction_weight,
+            "dmc_sign_weight": cfg.dmc_sign_weight,
+            "dmc_sparsity_weight": cfg.dmc_sparsity_weight,
+            "dmc_temporal_weight": cfg.dmc_temporal_weight,
+            "dmc_score_ema_decay": cfg.dmc_score_ema_decay,
         },
         "round_metrics": rounds,
     }
@@ -246,6 +261,16 @@ def main() -> None:
         "flanders_alpha",
         "flanders_beta",
         "flanders_num_clients_to_keep",
+        "dmc_warmup_rounds",
+        "dmc_tau",
+        "dmc_ema_decay",
+        "dmc_min_keep",
+        "dmc_norm_weight",
+        "dmc_direction_weight",
+        "dmc_sign_weight",
+        "dmc_sparsity_weight",
+        "dmc_temporal_weight",
+        "dmc_score_ema_decay",
     ):
         value = getattr(mr, name, None)
         if value is not None:

@@ -9,12 +9,12 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 try:
-    from .clients import ATTACK_REGISTRY, BaseClient, BenignClient
+    from .clients import ATTACK_REGISTRY, BaseClient, BenignClient, MixedAttackClient, mixed_attack_for_client
     from .config import FedConfig, normalize_attack_name, normalize_defense_name
     from .server import DEFENSE_REGISTRY, BaseServer, SVDDServer
     from .tasks import get_task
 except ImportError:
-    from clients import ATTACK_REGISTRY, BaseClient, BenignClient
+    from clients import ATTACK_REGISTRY, BaseClient, BenignClient, MixedAttackClient, mixed_attack_for_client
     from config import FedConfig, normalize_attack_name, normalize_defense_name
     from server import DEFENSE_REGISTRY, BaseServer, SVDDServer
     from tasks import get_task
@@ -190,7 +190,7 @@ def _defense_specific_monitor_items(
             ("cos(Δg, meanΔ_ben)", f"{cos_ben:.4f}"),
             ("cos(Δg, meanΔ_mal)", f"{cos_mal:.4f}"),
         ]
-    if dn in ("svdd", "seca", "fld", "alignins", "bnguard", "flgmm", "flanders"):
+    if dn in ("svdd", "seca", "fld", "alignins", "bnguard", "flgmm", "flanders", "dmc"):
         return common_global + [
             ("Client Δ L2 (ben avg)", f"{ben_norm_mean:.6f}"),
             ("Client Δ L2 (mal avg)", f"{mal_norm_mean:.6f}"),
@@ -288,7 +288,7 @@ def _apply_lie_attack(
     client_sds: List[Dict[str, Tensor]],
 ) -> None:
     """Rewrite all malicious uploads using ALIE/LIE: delta = mu + z * sigma."""
-    if config.attack_type != "lie":
+    if config.attack_type not in {"lie", "mix"}:
         return
 
     n = int(config.num_clients)
@@ -297,6 +297,15 @@ def _apply_lie_attack(
         return
 
     benign_n = max(1, n - m)
+    if config.attack_type == "lie":
+        lie_ids = list(range(config.num_benign, n))
+    else:
+        lie_ids = [
+            cid for cid in range(config.num_benign, n)
+            if mixed_attack_for_client(config, cid) == "lie"
+        ]
+    if not lie_ids:
+        return
     s = int(config.lie_s) if config.lie_s is not None else _default_lie_s(config, defense_name)
     s = max(0, min(s, benign_n - 1))
     ratio = float(benign_n - s) / float(benign_n)
@@ -319,7 +328,7 @@ def _apply_lie_attack(
         sigma = deltas.std(dim=0, unbiased=False)
         crafted_delta[k] = mu + z * sigma
 
-    for cid in range(config.num_benign, n):
+    for cid in lie_ids:
         rewritten: Dict[str, Tensor] = {}
         src = client_sds[cid]
         for k, g in global_sd.items():
@@ -501,7 +510,11 @@ def run_federated(
             channels_last=config.channels_last,
         )
         backdoor_asr = None
-        if config.attack_type == "bd":
+        has_backdoor = config.attack_type == "bd" or (
+            config.attack_type == "mix"
+            and any(mixed_attack_for_client(config, cid) == "bd" for cid in range(config.num_benign, config.num_clients))
+        )
+        if has_backdoor:
             backdoor_asr = evaluate_backdoor_asr(
                 server.global_model,
                 test_loader,

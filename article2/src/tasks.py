@@ -19,10 +19,10 @@ except Exception as e:
 
 try:
     from .config import FedConfig
-    from .models import ag_news_classifier, resnet18_cifar10, resnet18_fashion_mnist
+    from .models import ag_news_classifier, resnet18_cifar10, resnet18_fashion_mnist, resnet18_mnist
 except ImportError:
     from config import FedConfig
-    from models import ag_news_classifier, resnet18_cifar10, resnet18_fashion_mnist
+    from models import ag_news_classifier, resnet18_cifar10, resnet18_fashion_mnist, resnet18_mnist
 
 
 def _resolve_cifar10_root(config: FedConfig) -> str:
@@ -138,6 +138,34 @@ class FashionMnistTask(FederatedTask):
         test_dataset: Dataset = datasets.FashionMNIST(
             root=root, train=False, download=True, transform=transform_test
         )
+        return _split_train_test_loaders(config, train_dataset, test_dataset, self.num_classes)
+
+
+class MnistTask(FederatedTask):
+    name = "mnist"
+    num_classes = 10
+
+    def data_subdir(self, config: FedConfig) -> str:
+        return os.path.join(config.data_root, "mnist")
+
+    def build_model(self) -> torch.nn.Module:
+        return resnet18_mnist(num_classes=self.num_classes)
+
+    def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
+        transform_train = transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.RandomCrop(32, padding=4),
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ])
+        transform_test = transforms.Compose([
+            transforms.Resize((32, 32)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ])
+        root = self.data_subdir(config)
+        train_dataset: Dataset = datasets.MNIST(root=root, train=True, download=True, transform=transform_train)
+        test_dataset: Dataset = datasets.MNIST(root=root, train=False, download=True, transform=transform_test)
         return _split_train_test_loaders(config, train_dataset, test_dataset, self.num_classes)
 
 
@@ -448,6 +476,7 @@ def _split_train_test_loaders(
 
 TASK_REGISTRY: Dict[str, Type[FederatedTask]] = {
     "cifar10": Cifar10Task,
+    "mnist": MnistTask,
     "fashion_mnist": FashionMnistTask,
     "ag_news": AGNewsTask,
 }

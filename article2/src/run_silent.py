@@ -30,6 +30,8 @@ def run_silent(
     local_epochs=None,
     num_workers=None,
     svdd_input_mode=None,
+    num_clients=None,
+    num_benign=None,
 ):
     output_dir = Path(log_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -49,6 +51,10 @@ def run_silent(
                 cfg.local_epochs = int(local_epochs)
             if num_workers is not None:
                 cfg.num_workers = int(num_workers)
+            if num_clients is not None:
+                cfg.num_clients = int(num_clients)
+            if num_benign is not None:
+                cfg.num_benign = int(num_benign)
             if svdd_input_mode is not None:
                 cfg.svdd_input_mode = str(svdd_input_mode)
             print(f"[{idx}/{total}] {task} | attack={attack} | defense={defense} ...", flush=True)
@@ -76,6 +82,8 @@ if __name__ == "__main__":
     p.add_argument("--data-root", default=None)
     p.add_argument("--local-epochs", type=int, default=None)
     p.add_argument("--num-workers", type=int, default=None)
+    p.add_argument("--clients", type=int, default=None)
+    p.add_argument("--benign", type=int, default=None)
     p.add_argument(
         "--svdd-input-mode",
         choices=("absolute", "delta"),
@@ -100,4 +108,6 @@ if __name__ == "__main__":
         local_epochs=args.local_epochs,
         num_workers=args.num_workers,
         svdd_input_mode=args.svdd_input_mode,
+        num_clients=args.clients,
+        num_benign=args.benign,
     )
