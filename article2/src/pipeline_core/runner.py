@@ -261,8 +261,8 @@ def _feature_dimension(context: PipelineContext) -> int:
     feature_mode = str(config.svdd_feature_mode).lower().strip()
     if feature_mode == "fixed_projection":
         dimension = int(config.param_descriptor_dim)
-        if dimension not in (4096, 8192):
-            raise ValueError("param_descriptor_dim must be 4096 or 8192")
+        if dimension < 64:
+            raise ValueError("param_descriptor_dim must be at least 64")
         return dimension
     if feature_mode != "task":
         raise ValueError(
