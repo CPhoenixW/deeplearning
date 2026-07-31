@@ -1398,11 +1398,15 @@ class SVDDServer(BaseServer):
     def phase1_step(
         self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]
     ) -> Tuple[float, float, float, Tensor, Tensor]:
-        """AE warm-up: train AE and FedAvg using only the closest clients in feature space.
+        """Train the AE and select Phase-1 clients.
 
-        Distance = L2 norm to the coordinate-wise median of robust-scaled SVDD features
-        across all clients this round. Keep ``ae_warmup_keep_ratio`` of clients with
-        smallest distance (at least one).
+        The default ``phase1_selection='reconstruction'`` implements the
+        intended attribution hypothesis: arbitrary parameter/gradient poisoning
+        should reconstruct poorly and be excluded.  The old feature-median
+        selector remains available as an explicit ablation.  AE training uses
+        all clients in the default mode so that the first warm-up round does
+        not make a decision from an untrained encoder; selection is performed
+        from the post-update reconstruction errors.
 
         Returns:
             center_norm, z_variance, ae_loss,
@@ -1416,21 +1420,24 @@ class SVDDServer(BaseServer):
         ratio = min(max(ratio, 1e-6), 1.0)
         num_keep = max(1, min(K, int(round(ratio * K))))
 
-        ref = X.median(dim=0).values
-        distances = torch.norm(X - ref.unsqueeze(0), dim=1)
-        _, idx_keep = torch.topk(distances, k=num_keep, largest=False)
-        idx_keep = torch.sort(idx_keep).values
-
-        keep_mask = torch.zeros(K, dtype=torch.bool)
-        keep_mask[idx_keep] = True
-
-        self.ae.eval()
-        with torch.no_grad():
-            X_dev = X.to(self.device)
-            x_hat_cur = self.ae(X_dev)
-            per_client_loss = (x_hat_cur - X_dev).abs().sum(dim=1)  # (K,)
-
-        X_train = X[idx_keep].to(self.device)
+        selection = str(getattr(self.config, "phase1_selection", "reconstruction")).lower().strip()
+        if selection not in {"reconstruction", "feature_median"}:
+            raise ValueError(
+                "phase1_selection must be 'reconstruction' or 'feature_median', "
+                f"got {selection!r}."
+            )
+        X_dev = X.to(self.device)
+        if selection == "feature_median":
+            ref = X.median(dim=0).values
+            selector_scores = torch.norm(X - ref.unsqueeze(0), dim=1)
+            _, idx_keep = torch.topk(selector_scores, k=num_keep, largest=False)
+            idx_keep = torch.sort(idx_keep).values
+            X_train = X[idx_keep].to(self.device)
+        else:
+            # All clients contribute to representation learning. This is the
+            # only defensible way to score the first round with a fresh AE.
+            idx_keep = None
+            X_train = X_dev
 
         self.ae.train()
         x_hat = self.ae(X_train)
@@ -1442,6 +1449,21 @@ class SVDDServer(BaseServer):
         clip_grad_norm_(self.ae.parameters(), self.config.ae_grad_clip)
         self.optimizer_ae.step()
 
+        # Score after the update. For the reconstruction selector, low error
+        # clients are the Phase-1 trusted set. For the legacy selector, retain
+        # the feature-median decision while exposing reconstruction errors for
+        # the attribution experiments.
+        self.ae.eval()
+        with torch.no_grad():
+            x_hat_post = self.ae(X_dev)
+            per_client_loss = (x_hat_post - X_dev).abs().sum(dim=1)
+        if selection == "reconstruction":
+            _, idx_keep = torch.topk(per_client_loss, k=num_keep, largest=False)
+            idx_keep = torch.sort(idx_keep).values
+        assert idx_keep is not None
+        keep_mask = torch.zeros(K, dtype=torch.bool)
+        keep_mask[idx_keep] = True
+
         selected_sds = [client_state_dicts[int(i)] for i in idx_keep.tolist()]
         alpha_sel = torch.full((num_keep,), 1.0 / float(num_keep))
         global_sd = weighted_fedavg(
@@ -1452,7 +1474,6 @@ class SVDDServer(BaseServer):
         self.global_model.load_state_dict(global_sd)
 
         with torch.no_grad():
-            self.ae.eval()
             Z = self.ae.encode(X.to(self.device))
             z_var = Z.var().item()
             center_norm = 0.0 if self.c is None else float(self.c.norm().item())
@@ -1591,6 +1612,7 @@ class SVDDServer(BaseServer):
                 show_detection=True,
                 monitor_items=[
                     ("Defense", "SVDD"),
+                    ("Phase-1 Selector", str(self.config.phase1_selection)),
                     ("Feature Mode", str(self.config.svdd_feature_mode)),
                     (
                         "SVDD Input",

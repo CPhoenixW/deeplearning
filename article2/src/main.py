@@ -63,6 +63,44 @@ def evaluate(
     return acc, correct, total
 
 
+def evaluate_backdoor_asr(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    *,
+    target_label: int,
+    trigger_size: int,
+    trigger_value: float,
+    use_amp: bool = False,
+    channels_last: bool = False,
+) -> Optional[float]:
+    """Evaluate target-label success on test images with the training trigger."""
+    model.eval()
+    total = 0
+    success = 0
+    s = int(trigger_size)
+    if s <= 0:
+        return None
+    with torch.no_grad():
+        for x, _y in loader:
+            # The current backdoor client uses a pixel trigger only for images.
+            if x.ndim != 4:
+                return None
+            x = x.to(device, non_blocking=True).clone()
+            if channels_last:
+                x = x.contiguous(memory_format=torch.channels_last)
+            x[:, :, -s:, -s:] = float(trigger_value)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=bool(use_amp and device.type == "cuda"),
+            ):
+                logits = model(x)
+            success += int((torch.argmax(logits, dim=1) == int(target_label)).sum().item())
+            total += int(x.shape[0])
+    return float(success / total) if total > 0 else None
+
+
 def _flatten_float_state_delta(
     before_sd: Dict[str, Tensor],
     after_sd: Dict[str, Tensor],
@@ -462,6 +500,18 @@ def run_federated(
             use_amp=config.use_amp,
             channels_last=config.channels_last,
         )
+        backdoor_asr = None
+        if config.attack_type == "bd":
+            backdoor_asr = evaluate_backdoor_asr(
+                server.global_model,
+                test_loader,
+                device,
+                target_label=config.backdoor_target_label,
+                trigger_size=config.backdoor_trigger_size,
+                trigger_value=config.backdoor_trigger_value,
+                use_amp=config.use_amp,
+                channels_last=config.channels_last,
+            )
 
         # Monitoring metrics
         z_var_scalar = z_var
@@ -518,6 +568,7 @@ def run_federated(
                     "test_acc": float(test_acc),
                     "test_correct": int(correct),
                     "test_total": int(total),
+                    "backdoor_asr": backdoor_asr,
                     "malicious_detection_rate": float(tpr),  # TPR
                     "benign_false_positive_rate": float(fpr),  # FPR
                     "dar": float(dar),

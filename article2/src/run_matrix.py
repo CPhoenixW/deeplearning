@@ -130,6 +130,7 @@ def run_one_combo(
             "reuse_client_model": cfg.reuse_client_model,
             "skip_redundant_attack_training": cfg.skip_redundant_attack_training,
             "round_diagnostics": cfg.round_diagnostics,
+            "phase1_selection": cfg.phase1_selection,
             "trimmed_mean_ratio": cfg.trimmed_mean_ratio,
             "trimmed_mean_num_byzantine": cfg.trimmed_mean_num_byzantine,
             "krum_num_byzantine": cfg.krum_num_byzantine,
@@ -223,6 +224,8 @@ def main() -> None:
     cfg.reuse_client_model = bool(mr.reuse_client_model)
     cfg.skip_redundant_attack_training = bool(mr.skip_redundant_attack_training)
     cfg.round_diagnostics = bool(mr.round_diagnostics)
+    if mr.phase1_selection is not None:
+        cfg.phase1_selection = str(mr.phase1_selection)
     if mr.svdd_input_mode is not None:
         cfg.svdd_input_mode = str(mr.svdd_input_mode)
     if mr.svdd_feature_mode is not None:

@@ -108,8 +108,11 @@ class FedConfig:
 
     # --- Phase schedule ---
     phase1_rounds: int = 15
-    # AE warm-up: in robust-scaled BN space, keep clients closest to the coordinate-wise
-    # median; only they contribute to the AE backward step and this round's FedAvg.
+    # Phase-1 client selection. ``reconstruction`` matches the paper hypothesis:
+    # model/gradient poisoning should have high AE reconstruction error. The
+    # legacy ``feature_median`` rule is retained for controlled ablation only.
+    phase1_selection: str = "reconstruction"
+    # Fraction retained during Phase 1 (at least one client).
     ae_warmup_keep_ratio: float = 0.8
 
     # --- SOTA defenses (ported from experiment/FL-Byzantine-Library) ---
@@ -208,6 +211,7 @@ class MatrixRunConfig:
     reuse_client_model: bool = True
     skip_redundant_attack_training: bool = True
     round_diagnostics: bool = False
+    phase1_selection: str | None = None
     svdd_input_mode: str | None = None
     svdd_feature_mode: str | None = None
     param_descriptor_dim: int | None = None

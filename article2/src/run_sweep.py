@@ -126,6 +126,12 @@ def _summary(rounds: list[dict[str, Any]], num_benign: int) -> dict[str, Any]:
         "last": {k: last.get(k) for k in ("round", "test_acc", "malicious_detection_rate", "benign_false_positive_rate", "dpr", "rr", "reject_rate")},
         "mean_last_10": {k: mean(k) for k in ("test_acc", "malicious_detection_rate", "benign_false_positive_rate", "dpr", "rr", "reject_rate")},
         "best_test_acc": max(float(x["test_acc"]) for x in rounds),
+        "mean_last_10_backdoor_asr": (
+            float(sum(float(x["backdoor_asr"]) for x in tail if x.get("backdoor_asr") is not None) /
+                  max(1, sum(x.get("backdoor_asr") is not None for x in tail)))
+            if any(x.get("backdoor_asr") is not None for x in tail)
+            else None
+        ),
         "last_auroc": auc,
         "last_auprc": auprc,
     }
@@ -160,8 +166,16 @@ def main() -> None:
     parser.add_argument("--alphas", default="iid,0.1,0.5,1.0")
     parser.add_argument("--seeds", default="42,43,44")
     parser.add_argument("--rounds", type=int, default=50)
+    parser.add_argument("--phase1-rounds", type=int, default=15)
+    parser.add_argument("--svdd-recon-lambda", type=float, default=0.1)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--phase1-selection",
+        choices=("reconstruction", "feature_median"),
+        default="reconstruction",
+        help="Phase-1 selector; feature_median is a legacy ablation.",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--data-root", default=None)
     parser.add_argument("--output-dir", default=str(project_root() / "log" / "sweep"))
@@ -196,11 +210,14 @@ def main() -> None:
         batch_size=int(args.batch_size),
         device=args.device,
     )
+    base.phase1_rounds = int(args.phase1_rounds)
+    base.svdd_recon_lambda = float(args.svdd_recon_lambda)
     if args.data_root is not None:
         base.data_root = args.data_root
     base.round_diagnostics = False
     base.reuse_client_model = True
     base.skip_redundant_attack_training = True
+    base.phase1_selection = args.phase1_selection
 
     # Cache partitions by task/clients/alpha/seed.  Attacks and defenses share
     # exactly the same client data and hence produce paired comparisons.
