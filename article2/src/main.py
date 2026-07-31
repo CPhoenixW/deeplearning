@@ -524,6 +524,11 @@ def run_federated(
                     "dpr": float(dpr),
                     "rr": float(rr),
                     "reject_rate": float(reject_rate),
+                    # Keep the per-client evidence needed for post-hoc AUROC/
+                    # AUPRC and auditability.  Values are plain JSON types so
+                    # matrix runners do not need a torch dependency to inspect logs.
+                    "detection_scores": [float(x) for x in d.detach().cpu().reshape(-1).tolist()],
+                    "selected_mask": [bool(x) for x in (M >= 0.5).detach().cpu().reshape(-1).tolist()],
                 }
             )
 

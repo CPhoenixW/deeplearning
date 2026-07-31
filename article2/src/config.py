@@ -251,6 +251,8 @@ def load_matrix_run_config(path: str | Path | None = None) -> MatrixRunConfig:
 
 # --- Attack / defense short names (canonical); long CLI names map here ---
 ATTACK_ALIASES: dict[str, str] = {
+    "none": "none",
+    "no_attack": "none",
     "gaussian_noise": "gn",
     "label_flipping": "lf",
     "sign_flipping": "sf",

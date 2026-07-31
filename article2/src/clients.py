@@ -263,6 +263,10 @@ class LieAttackClient(MaliciousClientBase):
 
 
 ATTACK_REGISTRY: Dict[str, Type[BaseClient]] = {
+    # Explicit clean baseline.  The sweep runner also forces all clients to be
+    # benign for this attack id, so detection metrics are not contaminated by
+    # synthetic malicious labels.
+    "none": BenignClient,
     "gn": GaussianNoiseClient,
     "lf": LabelFlippingClient,
     "sf": SignFlippingClient,
