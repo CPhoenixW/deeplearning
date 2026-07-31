@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "values": {
+    "num_clients": 50,
+    "num_malicious": 10,
+    "total_rounds": 300,
+    "client_lr": 0.05,
+    "client_momentum": 0.9,
+    "client_weight_decay": 0.0005,
+    "local_epochs": 1,
+    "batch_size": 64,
+    "num_workers": 0,
+    "use_amp": false,
+    "channels_last": false,
+    "cuda_aggregation": true,
+    "reuse_client_model": true,
+    "client_batch_group_size": 10,
+    "round_diagnostics": false,
+    "seed": 42,
+    "device": "cuda",
+    "data_root": "data",
+    "dirichlet_alpha": 1.0,
+    "dirichlet_noniid_beta": null,
+    "mixed_attack_types": "lf,bd,gn"
+  }
+}

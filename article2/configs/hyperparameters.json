@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "common": {
+    "skip_redundant_attack_training": true,
+    "latent_dim": 64,
+    "ae_lr": 0.001,
+    "ae_weight_decay": 0.000001,
+    "ae_grad_clip": 1.0,
+    "svdd_input_mode": "delta",
+    "svdd_feature_mode": "fixed_projection",
+    "param_descriptor_dim": 4096,
+    "param_descriptor_seed": 2027,
+    "param_descriptor_device": "cuda",
+    "phase1_rounds": 15,
+    "ae_warmup_keep_ratio": 0.8,
+    "ag_news_svdd_features": "bn"
+  },
+  "defenses": {
+    "svdd": {
+      "svdd_warmup_rounds": 100,
+      "center_ema_decay": 0.9,
+      "tau_start": 3,
+      "tau_end": 2,
+      "svdd_max_keep_ratio": 1.0,
+      "tau_multiplier": 3.0,
+      "svdd_grad_clip": 1.0,
+      "svdd_feature_clip": 10.0,
+      "svdd_loss_weight": 1.0,
+      "recon_loss_weight": 1.0
+    },
+    "dmc": {
+      "dmc_warmup_rounds": 3,
+      "dmc_tau": 3.0,
+      "dmc_ema_decay": 0.8,
+      "dmc_min_keep": 1,
+      "dmc_norm_weight": 1.0,
+      "dmc_direction_weight": 1.0,
+      "dmc_sign_weight": 1.0,
+      "dmc_sparsity_weight": 0.5,
+      "dmc_temporal_weight": 1.0,
+      "dmc_score_ema_decay": 0.7
+    },
+    "tm": {
+      "trimmed_mean_ratio": 0.2,
+      "trimmed_mean_num_byzantine": null
+    },
+    "mk": {
+      "krum_num_byzantine": null,
+      "multi_krum_num_selected": null
+    },
+    "lasa": {
+      "lasa_sparsity_ratio": 0.9,
+      "lasa_lambda_n": 1.0,
+      "lasa_lambda_s": 1.0
+    },
+    "seca": {
+      "fedseca_sparsity_gamma": 0.9,
+      "fedseca_temperature": 1.0
+    },
+    "fld": {
+      "fldefender_pca_components": 2,
+      "fldefender_q1": 0.25
+    },
+    "alignins": {
+      "alignins_sparsity": 0.9,
+      "alignins_lambda_s": 1.0,
+      "alignins_lambda_c": 1.0
+    },
+    "bnguard": {
+      "bnguard_tau": 3.0
+    },
+    "flgmm": {
+      "flgmm_warmup_rounds": 50,
+      "flgmm_control_l": 3.0,
+      "flgmm_em_iters": 50
+    },
+    "flanders": {
+      "flanders_window": 5,
+      "flanders_sampling": 500,
+      "flanders_maxiter": 100,
+      "flanders_alpha": 1.0,
+      "flanders_beta": 1.0,
+      "flanders_num_clients_to_keep": null
+    }
+  },
+  "profiles": {
+    "gn": {
+      "common": {
+        "gaussian_sigma": 0.3
+      },
+      "defenses": {}
+    },
+    "lf": {
+      "common": {},
+      "defenses": {}
+    },
+    "sf": {
+      "common": {
+        "sign_flip_scale": 1.0
+      },
+      "defenses": {}
+    },
+    "bd": {
+      "common": {
+        "backdoor_target_label": 0,
+        "backdoor_poison_ratio": 0.6,
+        "backdoor_trigger_size": 5,
+        "backdoor_trigger_value": 1.0,
+        "backdoor_model_replace_scale": 3.0
+      },
+      "defenses": {}
+    },
+    "lie": {
+      "common": {
+        "lie_s": null,
+        "lie_z_override": null
+      },
+      "defenses": {}
+    }
+  }
+}

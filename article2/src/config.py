@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 
@@ -60,6 +60,9 @@ class FedConfig:
     cuda_aggregation: bool = False
     reuse_client_model: bool = False
     skip_redundant_attack_training: bool = False
+    # Number of benign clients trained together by the optional CUDA vmap
+    # executor.  ``1`` preserves the serial implementation.
+    client_batch_group_size: int = 1
     # Full update-vector diagnostics are useful interactively but expensive:
     # they repeatedly scan every client's complete model on CPU.
     round_diagnostics: bool = True
@@ -174,6 +177,11 @@ class FedConfig:
     tau_multiplier: float = 3.0
     svdd_grad_clip: float = 1.0
     svdd_recon_lambda: float = 0.1
+    # Modular pipeline names retained alongside the legacy alias above.
+    svdd_loss_weight: float = 1.0
+    recon_loss_weight: float = 1.0
+    svdd_max_keep_ratio: float = 1.0
+    svdd_feature_clip: float = 10.0
 
     # --- Task (dataset + backbone) ---
     # task_name keys must exist in tasks.TASK_REGISTRY, e.g. "cifar10", "fashion_mnist", "ag_news"
@@ -257,6 +265,10 @@ class MatrixRunConfig:
     seed: int = 42
     device: str = "cuda"
     trimmed_mean_num_byzantine: int | None = None
+    fed_config_file: str | None = None
+    hyperparameters_file: str | None = None
+    fed_config_overrides: dict[str, object] = field(default_factory=dict)
+    mixed_attack_types: str | None = None
 
 
 DEFAULT_MATRIX_RUN = MatrixRunConfig()
@@ -318,3 +330,98 @@ def normalize_attack_name(name: str) -> str:
 def normalize_defense_name(name: str) -> str:
     k = name.lower().strip()
     return DEFENSE_ALIASES.get(k, k)
+
+
+def resolve_fed_config_path(path: str | Path | None = None) -> Path:
+    """Resolve the modular pipeline's federated config without cwd dependence."""
+
+    return (project_root() / "configs" / "federated.json") if path is None else (
+        project_root() / path if not Path(path).is_absolute() else Path(path)
+    )
+
+
+def resolve_hyperparameters_path(path: str | Path | None = None) -> Path:
+    """Resolve the modular pipeline's hyperparameter table."""
+
+    return (project_root() / "configs" / "hyperparameters.json") if path is None else (
+        project_root() / path if not Path(path).is_absolute() else Path(path)
+    )
+
+
+def load_fed_config_values(path: str | Path | None) -> dict[str, object]:
+    if path is None:
+        return {}
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Federated config must be a JSON object.")
+    values = payload.get("values", payload)
+    if not isinstance(values, dict):
+        raise ValueError("Federated config 'values' must be a JSON object.")
+    return dict(values)
+
+
+def apply_fed_config_overrides(
+    config: FedConfig,
+    values: dict[str, object] | None,
+    *,
+    source: str = "overrides",
+) -> FedConfig:
+    """Apply validated JSON values to ``FedConfig``.
+
+    The server config historically used ``num_malicious`` while Python uses
+    ``num_benign``.  Both are accepted so old experiment files remain usable.
+    """
+
+    if not values:
+        return config
+    valid = {item.name for item in fields(config)}
+    pending_malicious = values.get("num_malicious")
+    for key, value in values.items():
+        if key == "num_malicious":
+            continue
+        if key not in valid:
+            raise ValueError(f"Unknown FedConfig field {key!r} in {source}.")
+        if key in {"data_root"} and isinstance(value, str) and not Path(value).is_absolute():
+            value = str(project_root() / value)
+        setattr(config, key, value)
+    if pending_malicious is not None:
+        config.num_benign = int(config.num_clients) - int(pending_malicious)
+    if "mixed_attack_types" in values and values["mixed_attack_types"] is None:
+        config.mixed_attack_types = "lf,bd,gn"
+    return config
+
+
+def load_hyperparameter_table(path: str | Path | None) -> dict[str, object]:
+    if path is None:
+        return {}
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("Hyperparameter table must be a JSON object.")
+    return payload
+
+
+def resolve_hyperparameters(
+    table: dict[str, object], attack: str, defense: str, task: str
+) -> dict[str, object]:
+    """Merge common, attack-profile, defense and task-specific overrides."""
+
+    result: dict[str, object] = {}
+    common = table.get("common", {})
+    if isinstance(common, dict):
+        result.update(common)
+    profiles = table.get("profiles", {})
+    profile = profiles.get(attack, {}) if isinstance(profiles, dict) else {}
+    if isinstance(profile, dict):
+        values = profile.get("common", {})
+        if isinstance(values, dict):
+            result.update(values)
+        profile_defenses = profile.get("defenses", {})
+        if isinstance(profile_defenses, dict) and isinstance(profile_defenses.get(defense), dict):
+            result.update(profile_defenses[defense])
+    defenses = table.get("defenses", {})
+    if isinstance(defenses, dict) and isinstance(defenses.get(defense), dict):
+        result.update(defenses[defense])
+    tasks = table.get("tasks", {})
+    if isinstance(tasks, dict) and isinstance(tasks.get(task), dict):
+        result.update(tasks[task])
+    return result

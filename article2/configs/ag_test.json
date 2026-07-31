@@ -1,0 +1,9 @@
+{
+  "task": "ag_news",
+  "attacks": "gn",
+  "defenses": "svdd",
+  "log_dir": "log/ag_news",
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "fed_config_overrides": {}
+}

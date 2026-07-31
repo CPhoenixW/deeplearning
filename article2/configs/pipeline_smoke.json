@@ -1,0 +1,15 @@
+{
+  "task": "ag_news",
+  "attacks": "gn",
+  "defenses": "svdd",
+  "log_dir": "log/pipeline_smoke",
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "fed_config_overrides": {
+    "total_rounds": 0,
+    "device": "cpu",
+    "client_batch_group_size": 1,
+    "num_clients": 2,
+    "num_malicious": 1
+  }
+}
