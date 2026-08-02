@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-os.environ["HF_DATASETS_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Type
@@ -12,8 +10,10 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 _HF_DATASETS_IMPORT_ERROR = None
 try:
+    from datasets import config as hf_datasets_config
     from datasets import load_dataset
 except Exception as e:
+    hf_datasets_config = None
     load_dataset = None
     _HF_DATASETS_IMPORT_ERROR = e
 
@@ -289,6 +289,11 @@ class AGNewsTask(FederatedTask):
 
         root = self.data_subdir(config)
         cache_dir = os.path.join(root, "hf_cache")
+        offline = bool(config.hf_datasets_offline)
+        os.environ["HF_DATASETS_OFFLINE"] = "1" if offline else "0"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1" if offline else "0"
+        if hf_datasets_config is not None:
+            hf_datasets_config.HF_DATASETS_OFFLINE = offline
         _normalize_proxy_env_schemes()
         try:
             ds = load_dataset("ag_news", cache_dir=cache_dir)

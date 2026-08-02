@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -57,6 +58,7 @@ class StructuredResultWriter:
             "planned_rounds": cfg.total_rounds,
             "config_files": dict(self.context.config_files),
             "applied_hyperparameters": dict(self.context.applied_hyperparameters),
+            "effective_config": asdict(cfg),
             **attack_metadata(self.context.attack_name, cfg),
         }
         for attempt in range(100):
@@ -108,6 +110,7 @@ class StructuredResultWriter:
                 "total_rounds": cfg.total_rounds,
                 "config_files": dict(self.context.config_files),
                 "applied_hyperparameters": dict(self.context.applied_hyperparameters),
+                "effective_config": asdict(cfg),
                 **attack_metadata(self.context.attack_name, cfg),
             },
             "rounds": self.context.rounds,

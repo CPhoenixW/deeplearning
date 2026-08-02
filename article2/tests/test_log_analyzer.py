@@ -7,6 +7,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from analyze_agnews_logs import parse_one_log
+from src.config import FedConfig
+from src.pipeline_core.contracts import PipelineContext
+from src.pipeline_core.result import StructuredResultWriter
 
 
 def test_log_analyzer_reads_pipeline_result_schema() -> None:
@@ -39,3 +42,32 @@ def test_log_analyzer_reads_pipeline_result_schema() -> None:
     assert parsed["avg_acc"] == 0.375
     assert parsed["avg_dar"] == 0.875
     assert parsed["avg_dpr"] == 0.625
+
+
+def test_result_metadata_records_effective_training_config() -> None:
+    config = FedConfig(
+        num_clients=2,
+        num_benign=2,
+        total_rounds=0,
+        client_lr=0.03,
+        client_weight_decay=0.0001,
+        attack_type="none",
+        defense_type="avg",
+        aggregation_method="avg",
+    )
+    with TemporaryDirectory() as directory:
+        context = PipelineContext(
+            config=config,
+            task_name="mnist",
+            attack_name="none",
+            defense_name="avg",
+            output_dir=Path(directory),
+            config_files={},
+        )
+        result_path = StructuredResultWriter(context).write()
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+
+    effective = payload["meta"]["effective_config"]
+    assert effective["client_lr"] == 0.03
+    assert effective["client_weight_decay"] == 0.0001
+    assert effective["seed"] == config.seed

@@ -200,6 +200,9 @@ class FedConfig:
     # (auto-detected). Fashion-MNIST uses <data_root>/fashion_mnist/FashionMNIST/.
     # AG News uses <data_root>/ag_news/hf_cache (HuggingFace datasets).
     data_root: str = field(default_factory=_default_data_root)
+    # Keep existing offline behavior by default. Fresh machines can set this
+    # to false in JSON so AG News is downloaded into data_root on first use.
+    hf_datasets_offline: bool = True
     # Strict non-IID partition (paper-style):
     # for each client k, sample class probabilities q^(k) ~ Dir(alpha * p),
     # where p is uniform prior over classes. Then assign a fixed number of

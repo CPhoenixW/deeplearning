@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "name": "stage_a_screen",
+  "tasks": [
+    "mnist",
+    "fashion_mnist",
+    "cifar10",
+    "ag_news"
+  ],
+  "client_lrs": [
+    0.005,
+    0.01,
+    0.03,
+    0.05,
+    0.1
+  ],
+  "client_weight_decays": [
+    0.0,
+    0.0001,
+    0.0005,
+    0.001
+  ],
+  "seeds": [
+    42
+  ],
+  "gpus": [
+    0,
+    1,
+    2
+  ],
+  "cpu_threads_per_worker": 8,
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "generated_config_dir": "configs/stage_a/generated_screen",
+  "output_root": "log/stage_a/screen",
+  "selection_file": "log/stage_a/screen_selection.json",
+  "score_last_n_rounds": 10,
+  "common_overrides": {
+    "num_clients": 100,
+    "num_malicious": 0,
+    "total_rounds": 60,
+    "client_momentum": 0.9,
+    "local_epochs": 1,
+    "num_workers": 0,
+    "use_amp": false,
+    "channels_last": false,
+    "cuda_aggregation": true,
+    "reuse_client_model": true,
+    "round_diagnostics": false,
+    "dirichlet_alpha": null,
+    "hf_datasets_offline": false
+  },
+  "task_overrides": {
+    "mnist": {
+      "batch_size": 256,
+      "client_batch_group_size": 25
+    },
+    "fashion_mnist": {
+      "batch_size": 256,
+      "client_batch_group_size": 25
+    },
+    "cifar10": {
+      "batch_size": 128,
+      "client_batch_group_size": 10
+    },
+    "ag_news": {
+      "batch_size": 128,
+      "client_batch_group_size": 10
+    }
+  },
+  "promotion_defaults": {
+    "top_k": 3,
+    "total_rounds": 300,
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "generated_config_dir": "configs/stage_a/generated_confirm",
+    "output_root": "log/stage_a/confirm",
+    "selection_file": "log/stage_a/confirm_selection.json"
+  }
+}
