@@ -31,10 +31,11 @@
 运行 4×5×4×1=80 个 trial，seed=42，每个 trial 60 轮。按最后 10 轮干净 TACC 均值为每个任务保留前三名。60 轮结果只用于减少候选，不能作为最终超参数结论。
 
 ```bash
-python3 -m tools.stage_a_calibration \
+.venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_screen.json plan
 
-nohup python3 -m tools.stage_a_calibration \
+mkdir -p log/stage_a
+nohup .venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_screen.json run \
   > log/stage_a/screen_launcher.log 2>&1 &
 ```
@@ -44,7 +45,7 @@ nohup python3 -m tools.stage_a_calibration \
 全部完成后生成排名：
 
 ```bash
-python3 -m tools.stage_a_calibration \
+.venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_screen.json select
 ```
 
@@ -53,18 +54,19 @@ python3 -m tools.stage_a_calibration \
 将每个任务的前三名提升到 300 轮，并用 seeds 42、43、44 确认，共 4×3×3=36 个 trial：
 
 ```bash
-python3 -m tools.stage_a_calibration \
+.venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_screen.json promote \
   --output configs/stage_a_confirm.json
 
-python3 -m tools.stage_a_calibration \
+.venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_confirm.json plan
 
-nohup python3 -m tools.stage_a_calibration \
+mkdir -p log/stage_a
+nohup .venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_confirm.json run \
   > log/stage_a/confirm_launcher.log 2>&1 &
 
-python3 -m tools.stage_a_calibration \
+.venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_confirm.json select
 ```
 
