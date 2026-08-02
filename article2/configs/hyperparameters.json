@@ -87,6 +87,24 @@
       "flanders_num_clients_to_keep": null
     }
   },
+  "tasks": {
+    "mnist": {
+      "client_lr": 0.1,
+      "client_weight_decay": 0.0001
+    },
+    "fashion_mnist": {
+      "client_lr": 0.1,
+      "client_weight_decay": 0.0
+    },
+    "cifar10": {
+      "client_lr": 0.05,
+      "client_weight_decay": 0.0001
+    },
+    "ag_news": {
+      "client_lr": 0.1,
+      "client_weight_decay": 0.0
+    }
+  },
   "profiles": {
     "gn": {
       "common": {

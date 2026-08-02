@@ -78,3 +78,17 @@ def test_modular_pipeline_registry_and_hyperparameters():
     assert values["param_descriptor_statistics_ratio"] == 0.125
     assert values["center_init_quantile"] == 0.5
     assert values["phase2_recon_quantile"] == 0.8
+
+
+def test_stage_a_selected_client_hyperparameters_are_task_specific():
+    table = load_hyperparameter_table("configs/hyperparameters.json")
+    expected = {
+        "mnist": (0.1, 0.0001),
+        "fashion_mnist": (0.1, 0.0),
+        "cifar10": (0.05, 0.0001),
+        "ag_news": (0.1, 0.0),
+    }
+    for task, (client_lr, client_weight_decay) in expected.items():
+        values = resolve_hyperparameters(table, "none", "avg", task)
+        assert values["client_lr"] == client_lr
+        assert values["client_weight_decay"] == client_weight_decay
