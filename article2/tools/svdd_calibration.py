@@ -315,7 +315,10 @@ def _effective_matches(
         return False
     for key, value in expected.items():
         if key == "num_malicious":
-            if int(meta.get("num_malicious", -1)) != int(value):
+            # The pipeline intentionally turns the no-attack control into an
+            # all-benign population so its FPR labels match actual behavior.
+            expected_malicious = 0 if meta.get("attack") == "none" else int(value)
+            if int(meta.get("num_malicious", -1)) != expected_malicious:
                 return False
         elif effective.get(key) != value:
             return False

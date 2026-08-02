@@ -4,7 +4,11 @@ import copy
 
 import pytest
 
-from tools.svdd_calibration import build_candidates, promote_manifest
+from tools.svdd_calibration import (
+    _effective_matches,
+    build_candidates,
+    promote_manifest,
+)
 
 
 def _manifest() -> dict:
@@ -82,3 +86,25 @@ def test_promotion_uses_ranked_explicit_candidates_and_full_budget() -> None:
     assert promoted["explicit_candidates"] == [candidates[3], candidates[1]]
     assert promoted["seeds"] == [42, 43, 44]
     assert promoted["common_overrides"]["total_rounds"] == 300
+
+
+def test_completion_accepts_pipeline_all_benign_no_attack_control() -> None:
+    expected = {"num_malicious": 30, "total_rounds": 60, "seed": 42}
+    no_attack = {
+        "meta": {
+            "attack": "none",
+            "defense": "svdd",
+            "num_malicious": 0,
+            "effective_config": {"total_rounds": 60, "seed": 42},
+        }
+    }
+    attacked = {
+        "meta": {
+            "attack": "mix",
+            "defense": "svdd",
+            "num_malicious": 30,
+            "effective_config": {"total_rounds": 60, "seed": 42},
+        }
+    }
+    assert _effective_matches(no_attack, expected, defense="svdd")
+    assert _effective_matches(attacked, expected, defense="svdd")
