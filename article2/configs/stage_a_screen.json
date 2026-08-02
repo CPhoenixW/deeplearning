@@ -28,7 +28,8 @@
     1,
     2
   ],
-  "cpu_threads_per_worker": 8,
+  "workers_per_gpu": 7,
+  "cpu_threads_per_worker": 3,
   "fed_config_file": "configs/federated.json",
   "hyperparameters_file": "configs/hyperparameters.json",
   "generated_config_dir": "configs/stage_a/generated_screen",
@@ -55,20 +56,20 @@
   },
   "task_overrides": {
     "mnist": {
-      "batch_size": 256,
+      "batch_size": 64,
       "client_batch_group_size": 25
     },
     "fashion_mnist": {
-      "batch_size": 256,
+      "batch_size": 64,
       "client_batch_group_size": 25
     },
     "cifar10": {
-      "batch_size": 128,
-      "client_batch_group_size": 10
+      "batch_size": 64,
+      "client_batch_group_size": 2
     },
     "ag_news": {
-      "batch_size": 128,
-      "client_batch_group_size": 10
+      "batch_size": 64,
+      "client_batch_group_size": 5
     }
   },
   "promotion_defaults": {

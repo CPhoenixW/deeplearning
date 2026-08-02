@@ -249,10 +249,11 @@ def prepare_datasets(manifest: Dict[str, Any]) -> None:
 
 
 def _is_complete(trial: Trial, expected_rounds: int) -> bool:
-    if not trial.result_path.exists():
+    if not trial.result_path.exists() or not trial.config_path.exists():
         return False
     try:
         payload = _load_object(trial.result_path)
+        trial_config = _load_object(trial.config_path)
     except (OSError, json.JSONDecodeError, ValueError):
         return False
     meta = payload.get("meta", {})
@@ -262,13 +263,16 @@ def _is_complete(trial: Trial, expected_rounds: int) -> bool:
     effective = meta.get("effective_config", {})
     if not isinstance(effective, dict):
         return False
+    expected_effective = trial_config.get("fed_config_overrides", {})
+    if not isinstance(expected_effective, dict):
+        return False
     return (
-        len(rounds) == expected_rounds
+        meta.get("task") == trial.task
+        and meta.get("attack") == "none"
+        and meta.get("defense") == "avg"
+        and len(rounds) == expected_rounds
         and int(meta.get("total_rounds", -1)) == expected_rounds
-        and float(effective.get("client_lr", -1.0)) == trial.client_lr
-        and float(effective.get("client_weight_decay", -1.0))
-        == trial.client_weight_decay
-        and int(effective.get("seed", -1)) == trial.seed
+        and all(effective.get(key) == value for key, value in expected_effective.items())
     )
 
 
@@ -284,11 +288,11 @@ def run_trials(
     manifest: Dict[str, Any],
     trials: Sequence[Trial],
     *,
-    gpu_ids: Sequence[int],
+    worker_gpu_ids: Sequence[int],
     force: bool = False,
 ) -> None:
-    if not gpu_ids:
-        raise ValueError("At least one GPU id is required")
+    if not worker_gpu_ids:
+        raise ValueError("At least one GPU worker is required")
     expected_rounds = int(manifest["common_overrides"]["total_rounds"])
     pending = [
         trial
@@ -298,7 +302,8 @@ def run_trials(
     skipped = len(trials) - len(pending)
     print(
         f"Stage-A trials total={len(trials)} pending={len(pending)} "
-        f"complete={skipped} workers={len(gpu_ids)}"
+        f"complete={skipped} workers={len(worker_gpu_ids)} "
+        f"gpus={sorted(set(worker_gpu_ids))}"
     )
     if not pending:
         return
@@ -311,7 +316,7 @@ def run_trials(
     python_binary = _python_binary(manifest)
     cpu_threads = str(int(manifest.get("cpu_threads_per_worker", 8)))
 
-    def worker(gpu_id: int) -> None:
+    def worker(worker_id: int, gpu_id: int) -> None:
         while True:
             try:
                 trial = work_queue.get_nowait()
@@ -332,7 +337,7 @@ def run_trials(
             )
             with lock:
                 print(
-                    f"[GPU {gpu_id}] START {trial.task} "
+                    f"[GPU {gpu_id}/W{worker_id}] START {trial.task} "
                     f"lr={trial.client_lr:g} wd={trial.client_weight_decay:g} "
                     f"seed={trial.seed}"
                 )
@@ -353,18 +358,22 @@ def run_trials(
                 )
             with lock:
                 if completed.returncode == 0:
-                    print(f"[GPU {gpu_id}] DONE  {trial.config_path.name}")
+                    print(
+                        f"[GPU {gpu_id}/W{worker_id}] DONE  "
+                        f"{trial.config_path.name}"
+                    )
                 else:
                     failures.append((trial, completed.returncode))
                     print(
-                        f"[GPU {gpu_id}] FAIL  {trial.config_path.name} "
+                        f"[GPU {gpu_id}/W{worker_id}] FAIL  "
+                        f"{trial.config_path.name} "
                         f"exit={completed.returncode} log={console_path}"
                     )
             work_queue.task_done()
 
     workers = [
-        threading.Thread(target=worker, args=(gpu_id,), daemon=False)
-        for gpu_id in gpu_ids
+        threading.Thread(target=worker, args=(worker_id, gpu_id), daemon=False)
+        for worker_id, gpu_id in enumerate(worker_gpu_ids)
     ]
     for thread in workers:
         thread.start()
@@ -526,6 +535,30 @@ def _manifest_gpu_ids(manifest: Dict[str, Any], override: str | None) -> List[in
     return [int(value) for value in values]
 
 
+def _worker_gpu_ids(
+    manifest: Dict[str, Any],
+    gpu_override: str | None,
+    workers_per_gpu_override: int | None,
+    *,
+    task: str | None = None,
+) -> List[int]:
+    gpu_ids = _manifest_gpu_ids(manifest, gpu_override)
+    if len(set(gpu_ids)) != len(gpu_ids):
+        raise ValueError("GPU ids must be unique; use workers_per_gpu for concurrency")
+    configured_workers: Any = manifest.get("workers_per_gpu", 1)
+    per_task = manifest.get("workers_per_gpu_by_task", {})
+    if task is not None and isinstance(per_task, dict):
+        configured_workers = per_task.get(task, configured_workers)
+    workers_per_gpu = int(
+        workers_per_gpu_override
+        if workers_per_gpu_override is not None
+        else configured_workers
+    )
+    if workers_per_gpu < 1:
+        raise ValueError("workers_per_gpu must be at least 1")
+    return [gpu_id for gpu_id in gpu_ids for _ in range(workers_per_gpu)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Three-GPU Stage-A clean FedAvg calibration utility"
@@ -540,8 +573,15 @@ def main() -> None:
         help="Download/cache all four datasets serially before multi-GPU execution",
     )
 
-    run_parser = subparsers.add_parser("run", help="Run/resume trials on one worker per GPU")
+    run_parser = subparsers.add_parser(
+        "run", help="Run/resume trials with configurable workers per GPU"
+    )
     run_parser.add_argument("--gpus", help="Comma-separated GPU ids; defaults to manifest")
+    run_parser.add_argument(
+        "--workers-per-gpu",
+        type=int,
+        help="Concurrent trial processes per GPU; defaults to manifest",
+    )
     run_parser.add_argument("--limit", type=int, help="Run only the first N trials")
     run_parser.add_argument("--force", action="store_true", help="Rerun complete trials")
 
@@ -565,9 +605,16 @@ def main() -> None:
         print(f"Generated {len(trials)} pipeline JSON files")
         return
     if args.command == "plan":
+        task_workers = {
+            str(task): len(
+                _worker_gpu_ids(manifest, None, None, task=str(task))
+            )
+            for task in manifest["tasks"]
+        }
         print(
             f"Stage-A plan trials={len(trials)} tasks={len(manifest['tasks'])} "
-            f"gpus={_manifest_gpu_ids(manifest, None)}"
+            f"gpus={_manifest_gpu_ids(manifest, None)} "
+            f"task_workers={task_workers}"
         )
         for task in manifest["tasks"]:
             count = sum(1 for trial in trials if trial.task == task)
@@ -578,12 +625,32 @@ def main() -> None:
         return
     if args.command == "run":
         selected_trials = trials[: args.limit] if args.limit else trials
-        run_trials(
-            manifest,
-            selected_trials,
-            gpu_ids=_manifest_gpu_ids(manifest, args.gpus),
-            force=bool(args.force),
-        )
+        per_task = manifest.get("workers_per_gpu_by_task")
+        if args.workers_per_gpu is not None or not isinstance(per_task, dict):
+            run_trials(
+                manifest,
+                selected_trials,
+                worker_gpu_ids=_worker_gpu_ids(
+                    manifest, args.gpus, args.workers_per_gpu
+                ),
+                force=bool(args.force),
+            )
+        else:
+            for task in manifest["tasks"]:
+                task_trials = [
+                    trial for trial in selected_trials if trial.task == str(task)
+                ]
+                if not task_trials:
+                    continue
+                print(f"Stage-A task={task}")
+                run_trials(
+                    manifest,
+                    task_trials,
+                    worker_gpu_ids=_worker_gpu_ids(
+                        manifest, args.gpus, None, task=str(task)
+                    ),
+                    force=bool(args.force),
+                )
         return
     if args.command == "select":
         selection = select_candidates(
