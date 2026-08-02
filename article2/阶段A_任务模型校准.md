@@ -35,7 +35,7 @@
   --manifest configs/stage_a_screen.json plan
 
 mkdir -p log/stage_a
-nohup .venv/bin/python -m tools.stage_a_calibration \
+nohup .venv/bin/python -u -m tools.stage_a_calibration \
   --manifest configs/stage_a_screen.json run \
   > log/stage_a/screen_launcher.log 2>&1 &
 ```
@@ -62,7 +62,7 @@ nohup .venv/bin/python -m tools.stage_a_calibration \
   --manifest configs/stage_a_confirm.json plan
 
 mkdir -p log/stage_a
-nohup .venv/bin/python -m tools.stage_a_calibration \
+nohup .venv/bin/python -u -m tools.stage_a_calibration \
   --manifest configs/stage_a_confirm.json run \
   > log/stage_a/confirm_launcher.log 2>&1 &
 
