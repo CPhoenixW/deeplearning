@@ -84,7 +84,7 @@ python -m tools.stage_a_calibration \
   --manifest configs/stage_a_screen.json prepare-data
 ```
 
-`configs/stage_a_screen.json` 首次将 `hf_datasets_offline` 设为 `false`，允许下载 AG News。缓存完成后可改为 `true`，防止正式重复实验访问网络。
+`prepare-data` 会通过 `prepare_data_overrides` 临时允许下载 AG News；生成的正式 trial 保持 `hf_datasets_offline=true`，只读取已经验证的缓存，不会因外网波动改变实验。
 
 查看进度：
 

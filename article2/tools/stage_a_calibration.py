@@ -225,6 +225,11 @@ def prepare_datasets(manifest: Dict[str, Any]) -> None:
             manifest.get("common_overrides", {}),
             source="stage_a.common_overrides",
         )
+        apply_fed_config_overrides(
+            config,
+            manifest.get("prepare_data_overrides", {}),
+            source="stage_a.prepare_data_overrides",
+        )
         if isinstance(task_overrides, dict):
             apply_fed_config_overrides(
                 config,

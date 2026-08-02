@@ -48,6 +48,9 @@
     "reuse_client_model": true,
     "round_diagnostics": false,
     "dirichlet_alpha": null,
+    "hf_datasets_offline": true
+  },
+  "prepare_data_overrides": {
     "hf_datasets_offline": false
   },
   "task_overrides": {

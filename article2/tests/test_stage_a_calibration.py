@@ -35,6 +35,7 @@ def test_stage_a_screen_manifest_generates_expected_grid() -> None:
     assert payload["attacks"] == "none"
     assert payload["defenses"] == "avg"
     assert payload["fed_config_overrides"]["num_malicious"] == 0
+    assert payload["fed_config_overrides"]["hf_datasets_offline"] is True
     assert payload["fed_config_overrides"]["batch_size"] == 256
     assert payload["fed_config_overrides"]["client_batch_group_size"] == 25
 
