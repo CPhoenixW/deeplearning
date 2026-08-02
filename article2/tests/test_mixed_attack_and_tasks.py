@@ -73,3 +73,8 @@ def test_modular_pipeline_registry_and_hyperparameters():
     assert values["svdd_feature_mode"] == "fixed_projection"
     assert values["svdd_loss_weight"] == 1.0
     assert "ag_news_svdd_features" not in values
+    assert values["param_descriptor_global_ratio"] == 0.5
+    assert values["param_descriptor_layer_ratio"] == 0.375
+    assert values["param_descriptor_statistics_ratio"] == 0.125
+    assert values["center_init_quantile"] == 0.5
+    assert values["phase2_recon_quantile"] == 0.8

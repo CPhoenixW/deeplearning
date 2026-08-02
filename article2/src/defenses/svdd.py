@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -67,6 +68,25 @@ def _compute_svdd_keep_mask(
     return keep_mask.float(), float(tau), float(threshold.item())
 
 
+def _lower_quantile_mask(
+    values: Tensor,
+    quantile: float,
+    *,
+    parameter_name: str,
+) -> Tensor:
+    """Select finite values at or below a validated lower quantile."""
+
+    q = float(quantile)
+    if not math.isfinite(q) or not 0.0 < q <= 1.0:
+        raise ValueError(f"{parameter_name} must be in (0, 1].")
+    if values.ndim != 1 or values.numel() == 0:
+        raise ValueError("Quantile selection requires a non-empty 1D tensor.")
+    if not bool(torch.isfinite(values).all().item()):
+        raise FloatingPointError("Quantile selection received non-finite values.")
+    cutoff = torch.quantile(values.detach(), q)
+    return values <= cutoff
+
+
 class SVDDDefense(BaseDefense):
     """Two-phase AE-SVDD defense server."""
 
@@ -106,6 +126,9 @@ class SVDDDefense(BaseDefense):
                 output_dim=int(config.param_descriptor_dim),
                 seed=int(config.param_descriptor_seed),
                 projection_device=descriptor_device,
+                global_ratio=float(config.param_descriptor_global_ratio),
+                layer_ratio=float(config.param_descriptor_layer_ratio),
+                statistics_ratio=float(config.param_descriptor_statistics_ratio),
             )
         # 限制潜在空间维度，避免高维距离退化
         latent_dim = min(config.latent_dim, 64)
@@ -314,9 +337,13 @@ class SVDDDefense(BaseDefense):
             finite_recon = finite_rows & torch.isfinite(recon_error)
             if not bool(finite_recon.any().item()):
                 raise FloatingPointError("No finite clients are available to initialize SVDD center.")
-            med = torch.median(recon_error[finite_recon])
-            init_mask = finite_recon & (recon_error <= med)
-            c = Z[init_mask].mean(dim=0)
+            finite_indices = torch.where(finite_recon)[0]
+            selected = _lower_quantile_mask(
+                recon_error[finite_recon],
+                self.config.center_init_quantile,
+                parameter_name="center_init_quantile",
+            )
+            c = Z[finite_indices[selected]].mean(dim=0)
             if not bool(torch.isfinite(c).all().item()):
                 raise FloatingPointError("SVDD center initialization produced non-finite values.")
             c[c.abs() < 0.01] = 0.01
@@ -396,8 +423,11 @@ class SVDDDefense(BaseDefense):
         X_cur = X[finite_rows].to(self.device)
         X_cur_hat = self.ae(X_cur)
         recon_per_sample = self.reconstruction_objective(X_cur_hat, X_cur)
-        q80 = torch.quantile(recon_per_sample.detach(), 0.8)
-        keep = recon_per_sample <= q80
+        keep = _lower_quantile_mask(
+            recon_per_sample,
+            self.config.phase2_recon_quantile,
+            parameter_name="phase2_recon_quantile",
+        )
         recon_loss = recon_per_sample[keep].mean()
 
         total_loss = (
@@ -442,4 +472,4 @@ class SVDDDefense(BaseDefense):
         return self.filtering_phase.run(self, round_idx, client_state_dicts)
 
 
-__all__ = ["SVDDDefense", "_compute_svdd_keep_mask"]
+__all__ = ["SVDDDefense", "_compute_svdd_keep_mask", "_lower_quantile_mask"]

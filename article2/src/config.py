@@ -102,6 +102,11 @@ class FedConfig:
     svdd_feature_mode: str = "fixed_projection"
     param_descriptor_dim: int = 4096
     param_descriptor_seed: int = 2027
+    # Fixed descriptor view allocation. Ratios must be non-negative and sum to 1.
+    # Zero-valued views support controlled structural ablations.
+    param_descriptor_global_ratio: float = 0.5
+    param_descriptor_layer_ratio: float = 0.375
+    param_descriptor_statistics_ratio: float = 0.125
     # "cpu" is deterministic; "cuda" is faster but scatter reductions can have
     # small floating-point ordering differences. "auto" follows the run device.
     param_descriptor_device: str = "cpu"
@@ -172,6 +177,10 @@ class FedConfig:
     svdd_grad_clip: float = 1.0
     svdd_loss_weight: float = 1.0
     recon_loss_weight: float = 1.0
+    # Trusted-sample quantiles used by center initialization and Phase-2
+    # reconstruction training. Values must be in (0, 1].
+    center_init_quantile: float = 0.5
+    phase2_recon_quantile: float = 0.8
     svdd_max_keep_ratio: float = 1.0
     svdd_feature_clip: float = 10.0
 
