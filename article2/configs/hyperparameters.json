@@ -12,8 +12,7 @@
     "param_descriptor_seed": 2027,
     "param_descriptor_device": "cuda",
     "phase1_rounds": 15,
-    "ae_warmup_keep_ratio": 0.8,
-    "ag_news_svdd_features": "bn"
+    "ae_warmup_keep_ratio": 0.8
   },
   "defenses": {
     "svdd": {

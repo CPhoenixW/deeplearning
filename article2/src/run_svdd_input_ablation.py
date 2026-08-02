@@ -1,4 +1,8 @@
-"""Run a controlled AE-SVDD input ablation: absolute model vs model delta.
+"""Run an optional task-feature ablation: absolute model vs model delta.
+
+The paper's default AE-SVDD path uses the fixed hierarchical descriptor and
+always describes model deltas. This utility explicitly selects the older
+task-specific feature path for a controlled representation study.
 
 Example from the project root::
 
@@ -103,7 +107,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compare absolute-model and model-delta inputs for AE-SVDD."
     )
-    parser.add_argument("--task", default="fashion_mnist")
+    parser.add_argument("--task", default="cifar10")
     parser.add_argument(
         "--attacks",
         default="gn",
@@ -164,6 +168,7 @@ def main() -> None:
         local_epochs=args.local_epochs,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        svdd_feature_mode="task",
     )
 
     if args.silent:

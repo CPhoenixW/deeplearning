@@ -19,10 +19,10 @@ except Exception as e:
 
 try:
     from .config import FedConfig
-    from .models import ag_news_classifier, resnet18_cifar10, resnet18_fashion_mnist, resnet18_mnist
+    from .models import ag_news_classifier, fashion_mnist_cnn, lenet_grayscale, resnet18_cifar10
 except ImportError:
     from config import FedConfig
-    from models import ag_news_classifier, resnet18_cifar10, resnet18_fashion_mnist, resnet18_mnist
+    from models import ag_news_classifier, fashion_mnist_cnn, lenet_grayscale, resnet18_cifar10
 
 
 def _resolve_cifar10_root(config: FedConfig) -> str:
@@ -110,14 +110,12 @@ class FashionMnistTask(FederatedTask):
         return os.path.join(config.data_root, "fashion_mnist")
 
     def build_model(self) -> torch.nn.Module:
-        return resnet18_fashion_mnist(num_classes=self.num_classes)
+        return fashion_mnist_cnn(num_classes=self.num_classes)
 
     def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
-        # Resize to 32×32 to match ResNet18 small-image stem (same spatial size as CIFAR-10).
         transform_train = transforms.Compose(
             [
-                transforms.Resize((32, 32)),
-                transforms.RandomCrop(32, padding=4),
+                transforms.RandomCrop(28, padding=2),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 transforms.Normalize((0.2860,), (0.3530,)),
@@ -125,7 +123,6 @@ class FashionMnistTask(FederatedTask):
         )
         transform_test = transforms.Compose(
             [
-                transforms.Resize((32, 32)),
                 transforms.ToTensor(),
                 transforms.Normalize((0.2860,), (0.3530,)),
             ]
@@ -149,17 +146,15 @@ class MnistTask(FederatedTask):
         return os.path.join(config.data_root, "mnist")
 
     def build_model(self) -> torch.nn.Module:
-        return resnet18_mnist(num_classes=self.num_classes)
+        return lenet_grayscale(num_classes=self.num_classes)
 
     def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
         transform_train = transforms.Compose([
-            transforms.Resize((32, 32)),
-            transforms.RandomCrop(32, padding=4),
+            transforms.RandomCrop(28, padding=2),
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])
         transform_test = transforms.Compose([
-            transforms.Resize((32, 32)),
             transforms.ToTensor(),
             transforms.Normalize((0.1307,), (0.3081,)),
         ])

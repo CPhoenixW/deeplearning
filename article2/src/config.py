@@ -93,19 +93,13 @@ class FedConfig:
     ae_lr: float = 1e-3
     ae_weight_decay: float = 1e-6
     ae_grad_clip: float = 1.0
-    # Input representation used by AE-SVDD before robust feature scaling:
-    # - "absolute": task-specific features extracted from each uploaded client model.
-    # - "delta": the same features extracted from (client model - pre-round global model).
-    #
-    # With the current per-round coordinate-wise median/MAD centering, these two
-    # modes are translation-equivalent for linear parameter extractors.  The option
-    # is retained explicitly so that this equivalence can be tested and so future
-    # scaling strategies can compare the two representations without code changes.
-    svdd_input_mode: str = "absolute"
+    # Input representation for the optional task-specific feature fallback.
+    # The default fixed descriptor always describes client model deltas.
+    svdd_input_mode: str = "delta"
     # Feature interface before AE-SVDD:
-    # - "task": existing task-specific BN / LayerNorm descriptor.
-    # - "fixed_projection": fixed hierarchical multi-view Phi(delta W).
-    svdd_feature_mode: str = "task"
+    # - "fixed_projection": fixed hierarchical multi-view Phi(delta W), default.
+    # - "task": optional task-specific BN / LayerNorm fallback for old studies.
+    svdd_feature_mode: str = "fixed_projection"
     param_descriptor_dim: int = 4096
     param_descriptor_seed: int = 2027
     # "cpu" is deterministic; "cuda" is faster but scatter reductions can have
@@ -186,8 +180,8 @@ class FedConfig:
     # --- Task (dataset + backbone) ---
     # task_name keys must exist in tasks.TASK_REGISTRY, e.g. "cifar10", "fashion_mnist", "ag_news"
     task_name: str = "cifar10"
-    # ag_news + SVDD only: "ln" = Transformer LayerNorm γ/β; "bn" = BN head only;
-    # "ln_bn" = concat LN+BN (~2048-D vs ~1024-D BN-only) for stronger detection signal.
+    # Optional AG News feature fallback, used only when svdd_feature_mode="task".
+    # The default fixed descriptor does not read this field.
     ag_news_svdd_features: str = "ln_bn"
     # Set automatically from the task in main.run_federated; used by label-flip etc.
     num_classes: int = 10

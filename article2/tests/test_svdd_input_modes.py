@@ -112,6 +112,7 @@ def test_svdd_phase1_outputs_match_between_input_modes() -> None:
         phase1_rounds=1,
         ae_warmup_keep_ratio=1.0,
         latent_dim=8,
+        svdd_feature_mode="task",
         svdd_input_mode="absolute",
         device="cpu",
     )
@@ -161,4 +162,3 @@ def test_svdd_phase1_outputs_match_between_input_modes() -> None:
             )
         else:
             assert torch.equal(absolute_value, delta_value)
-

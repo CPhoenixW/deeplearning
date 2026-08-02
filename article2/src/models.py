@@ -19,21 +19,72 @@ def resnet18_cifar10(num_classes: int = 10) -> nn.Module:
     return model
 
 
-def resnet18_fashion_mnist(num_classes: int = 10) -> nn.Module:
-    """ResNet18 for 32×32 grayscale (Fashion-MNIST resized): 1-channel stem, no maxpool."""
+class LeNetClassifier(nn.Module):
+    """LeNet-style classifier for native 28×28 grayscale images.
 
-    model = resnet18(weights=None)
-    model.conv1 = nn.Conv2d(1, 64, kernel_size=3, stride=1, padding=1, bias=False)
-    model.maxpool = nn.Identity()
-    in_features = model.fc.in_features
-    model.fc = nn.Linear(in_features, num_classes)
-    return model
+    The model deliberately contains no normalization-specific feature path:
+    AE-SVDD describes all trainable parameter deltas with the fixed
+    hierarchical multi-view descriptor.
+    """
+
+    def __init__(self, num_classes: int = 10) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 6, kernel_size=5),
+            nn.ReLU(inplace=True),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(6, 16, kernel_size=5),
+            nn.ReLU(inplace=True),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(16 * 4 * 4, 120),
+            nn.ReLU(inplace=True),
+            nn.Linear(120, 84),
+            nn.ReLU(inplace=True),
+            nn.Linear(84, num_classes),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.classifier(self.features(x))
 
 
-def resnet18_mnist(num_classes: int = 10) -> nn.Module:
-    """ResNet18 for 32x32 grayscale MNIST images."""
+def lenet_grayscale(num_classes: int = 10) -> nn.Module:
+    """Build the MNIST 28×28 backbone."""
 
-    return resnet18_fashion_mnist(num_classes=num_classes)
+    return LeNetClassifier(num_classes=num_classes)
+
+
+class FashionCNN(nn.Module):
+    """Lightweight CNN for native 28×28 Fashion-MNIST images."""
+
+    def __init__(self, num_classes: int = 10) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * 7 * 7, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.3),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.classifier(self.features(x))
+
+
+def fashion_mnist_cnn(num_classes: int = 10) -> nn.Module:
+    """Build the Fashion-MNIST 28×28 backbone."""
+
+    return FashionCNN(num_classes=num_classes)
 
 
 def build_resnet18(num_classes: int = 10) -> nn.Module:

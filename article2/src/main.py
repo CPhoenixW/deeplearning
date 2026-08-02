@@ -379,8 +379,8 @@ def run_federated(
     feature_mode = str(config.svdd_feature_mode).lower().strip()
     if feature_mode == "fixed_projection":
         d_bn = int(config.param_descriptor_dim)
-        if d_bn not in (4096, 8192):
-            raise ValueError("param_descriptor_dim must be 4096 or 8192.")
+        if d_bn < 64:
+            raise ValueError("param_descriptor_dim must be at least 64.")
     elif feature_mode == "task":
         tmp_model = task.build_model()
         d_bn = _svdd_feat(tmp_model.state_dict()).numel()
