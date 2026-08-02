@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import random
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import DataLoader
 
+from ..attacks import (
+    apply_round_attack,
+    create_attack_client,
+    evaluate_attack,
+    validate_attack_config,
+)
 from ..batched_clients import BatchedClientExecutor, train_clients_batched_or_serial
-from ..clients import ATTACK_REGISTRY, BaseClient, BenignClient, mixed_attack_for_client
+from ..clients import BaseClient, BenignClient
 from ..config import FedConfig, normalize_attack_name, normalize_defense_name
 from ..defenses import DEFENSE_REGISTRY
 from ..defenses.svdd import SVDDDefense
@@ -142,8 +148,6 @@ def build_clients(
 
     clients: List[BaseClient] = []
 
-    # Matrix clients execute serially, so they may share one training model.
-    # Direct runs can retain historical model-construction RNG consumption.
     shared_client_model = None
     if config.reuse_client_model:
         shared_client_model = task.build_model().to(device)
@@ -158,100 +162,22 @@ def build_clients(
             model = model.to(memory_format=torch.channels_last)
         return model
 
-    # Benign
     for cid in benign_ids:
         clients.append(BenignClient(cid, device, config, loaders[cid], model_fn))
 
-    # Malicious
-    attack_cls = ATTACK_REGISTRY.get(config.attack_type, None)
-    if attack_cls is None:
-        raise ValueError(f"Unknown attack_type: {config.attack_type}")
     for cid in malicious_ids:
-        clients.append(attack_cls(cid, device, config, loaders[cid], model_fn))
+        clients.append(
+            create_attack_client(
+                config.attack_type,
+                cid,
+                device,
+                config,
+                loaders[cid],
+                model_fn,
+            )
+        )
 
     return clients, gt
-
-
-def resolve_defense_name(config: FedConfig, use_svdd: Optional[bool]) -> str:
-    if use_svdd is None:
-        return config.defense_type
-    return "svdd" if use_svdd else config.aggregation_method
-
-
-def _default_lie_s(config: FedConfig, defense_name: str) -> int:
-    """Infer defense-specific s used in z_max formula when lie_s is not set."""
-    if defense_name == "mk":
-        return int(
-            config.krum_num_byzantine
-            if config.krum_num_byzantine is not None
-            else max(0, config.num_clients - config.num_benign)
-        )
-    if defense_name == "tm":
-        if config.trimmed_mean_num_byzantine is not None:
-            return int(config.trimmed_mean_num_byzantine)
-        return max(0, config.num_clients - config.num_benign)
-    return 0
-
-
-def _apply_lie_attack(
-    config: FedConfig,
-    defense_name: str,
-    global_sd: Dict[str, Tensor],
-    client_sds: List[Dict[str, Tensor]],
-) -> None:
-    """Rewrite all malicious uploads using ALIE/LIE: delta = mu + z * sigma."""
-    if config.attack_type not in {"lie", "mix"}:
-        return
-
-    n = int(config.num_clients)
-    m = max(0, n - int(config.num_benign))
-    if m <= 0:
-        return
-
-    benign_n = max(1, n - m)
-    lie_ids = (
-        list(range(config.num_benign, n))
-        if config.attack_type == "lie"
-        else [
-            cid for cid in range(config.num_benign, n)
-            if mixed_attack_for_client(config, cid) == "lie"
-        ]
-    )
-    if not lie_ids:
-        return
-    s = int(config.lie_s) if config.lie_s is not None else _default_lie_s(config, defense_name)
-    s = max(0, min(s, benign_n - 1))
-    ratio = float(benign_n - s) / float(benign_n)
-    ratio = min(max(ratio, 1e-6), 1.0 - 1e-6)
-    if config.lie_z_override is not None:
-        z = float(config.lie_z_override)
-    else:
-        z = float(torch.distributions.Normal(0.0, 1.0).icdf(torch.tensor(ratio)).item())
-
-    benign_updates = client_sds[: config.num_benign]
-    crafted_delta: Dict[str, Tensor] = {}
-    for k, g in global_sd.items():
-        g_cpu = g.detach().cpu()
-        if not g_cpu.is_floating_point():
-            continue
-        deltas = torch.stack(
-            [(sd[k].detach().cpu().float() - g_cpu.float()) for sd in benign_updates], dim=0
-        )
-        mu = deltas.mean(dim=0)
-        sigma = deltas.std(dim=0, unbiased=False)
-        crafted_delta[k] = mu + z * sigma
-
-    for cid in lie_ids:
-        rewritten: Dict[str, Tensor] = {}
-        src = client_sds[cid]
-        for k, g in global_sd.items():
-            g_cpu = g.detach().cpu()
-            if g_cpu.is_floating_point():
-                out = g_cpu.float() + crafted_delta[k]
-                rewritten[k] = out.to(dtype=g_cpu.dtype).clone()
-            else:
-                rewritten[k] = src[k].detach().cpu().clone()
-        client_sds[cid] = rewritten
 
 
 def _feature_dimension(context: PipelineContext) -> int:
@@ -366,6 +292,7 @@ def _build_round_event(context: PipelineContext) -> Dict[str, Any]:
         "test_acc": context.evaluation["accuracy"],
         "test_correct": context.evaluation["correct"],
         "test_total": context.evaluation["total"],
+        "backdoor_asr": context.evaluation.get("backdoor_asr"),
         "tpr": tpr,
         "fpr": fpr,
         "dar": float((tp + tn) / total_clients),
@@ -374,6 +301,16 @@ def _build_round_event(context: PipelineContext) -> Dict[str, Any]:
         "reject_rate": float(rejected.float().mean().item()),
         "diagnostics": diagnostics,
     }
+
+
+def _evaluate_extra(context: PipelineContext) -> Dict[str, Any]:
+    return evaluate_attack(
+        context.attack_name,
+        context.config,
+        context.defense.global_model,
+        context.test_loader,
+        context.device,
+    )
 
 
 def run_pipeline(context: PipelineContext) -> PipelineContext:
@@ -386,6 +323,7 @@ def run_pipeline(context: PipelineContext) -> PipelineContext:
     config.aggregation_method = normalize_defense_name(config.aggregation_method)
     context.attack_name = normalize_attack_name(context.attack_name)
     context.defense_name = normalize_defense_name(context.defense_name)
+    validate_attack_config(context.attack_name, config)
     context.device = resolve_device(config)
     if context.device.type == "cuda" and (config.use_amp or config.channels_last):
         torch.backends.cudnn.benchmark = True
@@ -406,9 +344,9 @@ def run_pipeline(context: PipelineContext) -> PipelineContext:
 
     RoundPipeline(
         ClientTrainStage(train_clients_batched_or_serial),
-        AttackStage(_apply_lie_attack),
+        AttackStage(apply_round_attack),
         DefenseStage(),
-        EvaluationStage(evaluate, _build_round_event),
+        EvaluationStage(evaluate, _build_round_event, _evaluate_extra),
         OutputStage(print_round_event),
     ).run(context)
     return context

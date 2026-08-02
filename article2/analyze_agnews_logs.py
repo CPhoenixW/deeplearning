@@ -28,22 +28,35 @@ def parse_one_log(file_path: Path, last_n: int) -> Optional[Dict[str, object]]:
         return None
 
     meta = data.get("meta", {})
-    round_metrics = data.get("round_metrics", [])
-    if not round_metrics:
-        print(f"[WARN] round_metrics 为空，跳过 {file_path.name}")
+    rounds = data.get("rounds", [])
+    if not rounds:
+        print(f"[WARN] rounds 为空，跳过 {file_path.name}")
         return None
 
     attack = meta.get("attack")
     defense = meta.get("defense")
-    task_name = meta.get("task_name")
+    task_name = meta.get("task")
     if not attack or not defense or not task_name:
         print(f"[WARN] 元信息缺失，跳过 {file_path.name}")
         return None
 
-    tail = round_metrics[-last_n:]
-    acc_values = [x.get("test_acc") for x in tail if isinstance(x.get("test_acc"), (int, float))]
-    dar_values = [x.get("dar") for x in tail if isinstance(x.get("dar"), (int, float))]
-    dpr_values = [x.get("dpr") for x in tail if isinstance(x.get("dpr"), (int, float))]
+    tail = rounds[-last_n:]
+    evaluations = [item.get("evaluation", {}) for item in tail]
+    acc_values = [
+        item.get("accuracy")
+        for item in evaluations
+        if isinstance(item.get("accuracy"), (int, float))
+    ]
+    dar_values = [
+        item.get("dar")
+        for item in evaluations
+        if isinstance(item.get("dar"), (int, float))
+    ]
+    dpr_values = [
+        item.get("dpr")
+        for item in evaluations
+        if isinstance(item.get("dpr"), (int, float))
+    ]
 
     return {
         "task_name": task_name,

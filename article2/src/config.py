@@ -39,7 +39,7 @@ class FedConfig:
     trimmed_mean_num_byzantine: int | None = None
     krum_num_byzantine: int | None = None
     multi_krum_num_selected: int | None = None
-    # --- Attack type (short IDs: gn, lf, sf, bd, lie; long names still accepted) ---
+    # --- Attack type (short IDs: none, gn, lf, sf, bd, lie, mix; aliases accepted) ---
     attack_type: str = "bd"
     # Comma-separated attack IDs assigned deterministically across malicious
     # clients for the mixed-attack experiment (e.g. ``lf,bd,gn,lie``).
@@ -170,8 +170,6 @@ class FedConfig:
     # Backward-compatible fixed tau; only used when tau_start/tau_end are invalid.
     tau_multiplier: float = 3.0
     svdd_grad_clip: float = 1.0
-    svdd_recon_lambda: float = 0.1
-    # Modular pipeline names retained alongside the legacy alias above.
     svdd_loss_weight: float = 1.0
     recon_loss_weight: float = 1.0
     svdd_max_keep_ratio: float = 1.0
@@ -207,80 +205,34 @@ class FedConfig:
 
 
 @dataclass
-class MatrixRunConfig:
-    """``run_matrix`` 默认：任务 × 攻击 × 防御网格；字段可被 JSON（``--config``）覆盖。"""
+class PipelineConfig:
+    """JSON-driven task × attack × defense pipeline configuration."""
 
-    # 与 argparse 时期一致：task 为 ``all``、逗号分隔或单个名；attacks/defenses 为 ``all`` 或逗号分隔。
     task: str = "cifar10"
     attacks: str = "all"
     defenses: str = "all"
-    # ``None`` → ``<project>/log``
     log_dir: str | None = None
-    total_rounds: int = 300
-    num_clients: int = 50
-    # 矩阵脚本历史上默认 40，与 ``FedConfig`` 默认 35 区分。
-    num_benign: int = 40
-    data_root: str | None = None
-    local_epochs: int = 1
-    num_workers: int | None = None
-    use_amp: bool = False
-    channels_last: bool = False
-    cuda_aggregation: bool = True
-    reuse_client_model: bool = True
-    skip_redundant_attack_training: bool = True
-    round_diagnostics: bool = False
-    phase1_selection: str | None = None
-    svdd_input_mode: str | None = None
-    svdd_feature_mode: str | None = None
-    param_descriptor_dim: int | None = None
-    param_descriptor_seed: int | None = None
-    param_descriptor_device: str | None = None
-    flgmm_warmup_rounds: int | None = None
-    flgmm_control_l: float | None = None
-    flgmm_em_iters: int | None = None
-    flanders_window: int | None = None
-    flanders_sampling: int | None = None
-    flanders_maxiter: int | None = None
-    flanders_alpha: float | None = None
-    flanders_beta: float | None = None
-    flanders_num_clients_to_keep: int | None = None
-    dmc_warmup_rounds: int | None = None
-    dmc_tau: float | None = None
-    dmc_ema_decay: float | None = None
-    dmc_min_keep: int | None = None
-    dmc_norm_weight: float | None = None
-    dmc_direction_weight: float | None = None
-    dmc_sign_weight: float | None = None
-    dmc_sparsity_weight: float | None = None
-    dmc_temporal_weight: float | None = None
-    dmc_score_ema_decay: float | None = None
-    # ``None`` 表示不覆盖 ``FedConfig`` 默认（例如 dirichlet）。
-    dirichlet_alpha: float | None = None
-    seed: int = 42
-    device: str = "cuda"
-    trimmed_mean_num_byzantine: int | None = None
     fed_config_file: str | None = None
     hyperparameters_file: str | None = None
     fed_config_overrides: dict[str, object] = field(default_factory=dict)
-    mixed_attack_types: str | None = None
 
 
-DEFAULT_MATRIX_RUN = MatrixRunConfig()
+DEFAULT_PIPELINE_RUN = PipelineConfig()
 
 
-def load_matrix_run_config(path: str | Path | None = None) -> MatrixRunConfig:
-    """深拷贝 ``DEFAULT_MATRIX_RUN``，若给定 ``path`` 则按 JSON 键合并（未知键报错）。"""
+def load_pipeline_config(path: str | Path | None = None) -> PipelineConfig:
+    """Load one validated JSON pipeline configuration."""
 
-    cfg = copy.deepcopy(DEFAULT_MATRIX_RUN)
+    cfg = copy.deepcopy(DEFAULT_PIPELINE_RUN)
     if path is None:
         return cfg
     p = Path(path)
     data = json.loads(p.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("Matrix run config JSON must be a single object at the top level.")
+        raise ValueError("Pipeline config JSON must be a single object at the top level.")
     for key, value in data.items():
         if not hasattr(cfg, key):
-            raise ValueError(f"Unknown MatrixRunConfig field: {key!r}")
+            raise ValueError(f"Unknown PipelineConfig field: {key!r}")
         setattr(cfg, key, value)
     return cfg
 

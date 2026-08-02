@@ -3,8 +3,13 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from src.clients import GaussianNoiseClient, LieAttackClient
-from src.config import FedConfig, MatrixRunConfig
+from src.attacks import GaussianNoiseAttack, LieAttack
+from src.config import (
+    FedConfig,
+    load_fed_config_values,
+    load_hyperparameter_table,
+    resolve_hyperparameters,
+)
 from src.utils import aggregate_trimmed_mean, compute_multi_krum_scores, weighted_fedavg
 
 
@@ -19,16 +24,22 @@ def _unused_model() -> nn.Module:
     raise AssertionError("attack must not build or train a local model")
 
 
-def test_matrix_defaults_enable_fast_path() -> None:
-    cfg = MatrixRunConfig()
+def test_federated_config_enables_fast_path() -> None:
+    values = load_fed_config_values("configs/federated.json")
+    hyperparameters = resolve_hyperparameters(
+        load_hyperparameter_table("configs/hyperparameters.json"),
+        "gn",
+        "svdd",
+        "cifar10",
+    )
     # On RTX 4060 + 32x32 CIFAR batches, AMP/channels-last are slower; keep
     # them available as opt-ins for larger workloads.
-    assert not cfg.use_amp
-    assert not cfg.channels_last
-    assert cfg.cuda_aggregation
-    assert cfg.reuse_client_model
-    assert cfg.skip_redundant_attack_training
-    assert not cfg.round_diagnostics
+    assert not values["use_amp"]
+    assert not values["channels_last"]
+    assert values["cuda_aggregation"]
+    assert values["reuse_client_model"]
+    assert hyperparameters["skip_redundant_attack_training"]
+    assert not values["round_diagnostics"]
 
 
 def test_gaussian_and_lie_skip_discarded_local_training() -> None:
@@ -41,11 +52,11 @@ def test_gaussian_and_lie_skip_discarded_local_training() -> None:
     reference = _tiny_state(2.0)
     loader = []
 
-    gaussian = GaussianNoiseClient(1, torch.device("cpu"), cfg, loader, _unused_model)
+    gaussian = GaussianNoiseAttack(1, torch.device("cpu"), cfg, loader, _unused_model)
     gaussian_upload = gaussian.local_step(reference)
     assert gaussian_upload.keys() == reference.keys()
 
-    lie = LieAttackClient(1, torch.device("cpu"), cfg, loader, _unused_model)
+    lie = LieAttack(1, torch.device("cpu"), cfg, loader, _unused_model)
     assert lie.local_step(reference) is reference
 
 

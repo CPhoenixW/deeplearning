@@ -6,8 +6,8 @@ import torch
 from torch import nn
 
 from src.config import FedConfig
+from src.defenses import DefenseContext, SVDDDefense
 from src.fixed_descriptor import FixedHierarchicalMultiViewDescriptor
-from src.server import SVDDServer
 
 
 class _TinyModel(nn.Module):
@@ -83,7 +83,7 @@ def test_fixed_descriptor_feeds_svdd_phase1() -> None:
     def model_fn() -> nn.Module:
         return _TinyModel()
 
-    server = SVDDServer(
+    server = SVDDDefense(
         cfg,
         d_bn=64,
         device=torch.device("cpu"),
@@ -98,7 +98,9 @@ def test_fixed_descriptor_feeds_svdd_phase1() -> None:
                 state[name] = value + (idx + 1) * 0.001
         clients.append(state)
 
-    stats = server.aggregate(1, clients)
+    stats = server.aggregate(
+        DefenseContext(1, reference, clients)
+    )
     assert stats.d.shape == (cfg.num_clients,)
     assert stats.m.shape == (cfg.num_clients,)
     assert torch.isfinite(stats.d).all()

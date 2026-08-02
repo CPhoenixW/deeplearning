@@ -114,22 +114,25 @@ class RoundReporter:
             )
             participant["id"] = participant.pop("client_id")
             participants.append(participant)
+        evaluation = {
+            "accuracy": float(event["test_acc"]),
+            "correct": int(event["test_correct"]),
+            "total": int(event["test_total"]),
+            "tpr": float(event["tpr"]),
+            "fpr": float(event["fpr"]),
+            "dar": float(event["dar"]),
+            "dpr": float(event["dpr"]),
+            "rr": float(event["rr"]),
+            "reject_rate": float(event["reject_rate"]),
+        }
+        if event.get("backdoor_asr") is not None:
+            evaluation["backdoor_asr"] = float(event["backdoor_asr"])
         return {
             "round": int(event["round"]),
             "phase": str(event["phase"]),
             "server": self.server_metrics(event),
             "participants": participants,
-            "evaluation": {
-                "accuracy": float(event["test_acc"]),
-                "correct": int(event["test_correct"]),
-                "total": int(event["test_total"]),
-                "tpr": float(event["tpr"]),
-                "fpr": float(event["fpr"]),
-                "dar": float(event["dar"]),
-                "dpr": float(event["dpr"]),
-                "rr": float(event["rr"]),
-                "reject_rate": float(event["reject_rate"]),
-            },
+            "evaluation": evaluation,
         }
 
     def ordered_server_metrics(
@@ -153,11 +156,14 @@ class RoundReporter:
         for key, value in self.ordered_server_metrics(payload["server"]):
             print(f"  {key}: {value}")
         evaluation = payload["evaluation"]
-        print(
+        evaluation_line = (
             "Evaluation  "
             f"accuracy={evaluation['accuracy']:.4f}  "
             f"TPR={evaluation['tpr']:.4f}  FPR={evaluation['fpr']:.4f}"
         )
+        if "backdoor_asr" in evaluation:
+            evaluation_line += f"  ASR={evaluation['backdoor_asr']:.4f}"
+        print(evaluation_line)
         print(f"Participant Metrics ({self.title})")
         headers = ["ID", "Role", "Accepted", "Weight"] + [label for _key, label in columns]
         rows = []

@@ -1,22 +1,30 @@
+"""Generic federated clients without attack-specific behavior."""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Optional, Tuple, Type
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
-try:
-    from .config import FedConfig
-except ImportError:
-    from config import FedConfig
+from .config import FedConfig
+
+
+ModelFactory = Callable[[], nn.Module]
 
 
 class BaseClient(ABC):
     """Abstract client interface for federated learning."""
 
-    def __init__(self, client_id: int, device: torch.device, config: FedConfig, loader: DataLoader) -> None:
+    def __init__(
+        self,
+        client_id: int,
+        device: torch.device,
+        config: FedConfig,
+        loader: DataLoader,
+    ) -> None:
         self.client_id = client_id
         self.device = device
         self.config = config
@@ -28,16 +36,23 @@ class BaseClient(ABC):
         global_state_dict: Dict[str, Tensor],
         reference_state_dict: Optional[Dict[str, Tensor]] = None,
     ) -> Dict[str, Tensor]:
-        """Receive global model, perform local update, and return local model state_dict."""
+        """Train from the global model and return one uploaded model state."""
 
 
 class BenignClient(BaseClient):
-    """Standard SGD training on local data."""
+    """Standard local SGD client."""
 
-    def __init__(self, client_id: int, device: torch.device, config: FedConfig, loader: DataLoader, model_fn) -> None:
+    def __init__(
+        self,
+        client_id: int,
+        device: torch.device,
+        config: FedConfig,
+        loader: DataLoader,
+        model_fn: ModelFactory,
+    ) -> None:
         super().__init__(client_id, device, config, loader)
         self.model_fn = model_fn
-        self._criterion = self._build_criterion()
+        self._criterion = nn.CrossEntropyLoss()
         self._amp_enabled = bool(config.use_amp and device.type == "cuda")
         self._scaler = torch.amp.GradScaler("cuda", enabled=self._amp_enabled)
 
@@ -49,31 +64,29 @@ class BenignClient(BaseClient):
             weight_decay=self.config.client_weight_decay,
         )
 
-    def _build_criterion(self) -> nn.Module:
-        return nn.CrossEntropyLoss()
-
     def _transform_batch(self, x: Tensor, y: Tensor) -> Tuple[Tensor, Tensor]:
-        """Hook for subclasses to modify local training batches."""
+        """Hook used by data-poisoning attack clients."""
+
         return x, y
 
     def _train_one_round(self, model: nn.Module) -> None:
         model.train()
         optimizer = self._build_optimizer(model)
-        for _ in range(self.config.local_epochs):
-            for x, y in self.loader:
-                x = x.to(self.device, non_blocking=True)
-                y = y.to(self.device, non_blocking=True)
-                if self.config.channels_last and x.ndim == 4:
-                    x = x.contiguous(memory_format=torch.channels_last)
-                x, y = self._transform_batch(x, y)
+        for _ in range(int(self.config.local_epochs)):
+            for inputs, labels in self.loader:
+                inputs = inputs.to(self.device, non_blocking=True)
+                labels = labels.to(self.device, non_blocking=True)
+                if self.config.channels_last and inputs.ndim == 4:
+                    inputs = inputs.contiguous(memory_format=torch.channels_last)
+                inputs, labels = self._transform_batch(inputs, labels)
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(
                     device_type=self.device.type,
                     dtype=torch.float16,
                     enabled=self._amp_enabled,
                 ):
-                    logits = model(x)
-                    loss = self._criterion(logits, y)
+                    logits = model(inputs)
+                    loss = self._criterion(logits, labels)
                 if self._amp_enabled:
                     self._scaler.scale(loss).backward()
                     self._scaler.step(optimizer)
@@ -87,8 +100,12 @@ class BenignClient(BaseClient):
         global_state_dict: Dict[str, Tensor],
         local_state_dict: Dict[str, Tensor],
     ) -> Dict[str, Tensor]:
-        """Hook for subclasses to modify uploaded model state dict."""
-        return {k: v.detach().cpu().clone() for k, v in local_state_dict.items()}
+        """Hook used by model-poisoning attack clients."""
+
+        return {
+            key: value.detach().cpu().clone()
+            for key, value in local_state_dict.items()
+        }
 
     def local_step(
         self,
@@ -96,215 +113,13 @@ class BenignClient(BaseClient):
         reference_state_dict: Optional[Dict[str, Tensor]] = None,
     ) -> Dict[str, Tensor]:
         model = self.model_fn()
-        first_param = next(model.parameters(), None)
-        if first_param is not None and first_param.device != self.device:
+        first_parameter = next(model.parameters(), None)
+        if first_parameter is not None and first_parameter.device != self.device:
             model = model.to(self.device)
         model.load_state_dict(global_state_dict)
         self._train_one_round(model)
-        local_sd = model.state_dict()
-        upload_reference = reference_state_dict or global_state_dict
-        return self._postprocess_upload(upload_reference, local_sd)
-
-
-class MaliciousClientBase(BenignClient):
-    """Base class for malicious clients with override hooks."""
-
-    def __init__(
-        self,
-        client_id: int,
-        device: torch.device,
-        config: FedConfig,
-        loader: DataLoader,
-        model_fn: Callable[[], nn.Module],
-    ) -> None:
-        super().__init__(client_id, device, config, loader, model_fn)
-
-
-class GaussianNoiseClient(MaliciousClientBase):
-    """Gaussian attack: per-parameter-tensor draw from N(μ, (s·σ)²).
-
-    μ and σ are the empirical mean and std of that tensor in the *global* model.
-    Upload is μ + s * σ * ε with ε ~ N(0,1) i.i.d., so each layer keeps the same
-    first-order marginal scale as global weights but destroys parameter structure,
-    which is typically harder to flag than fixed global noise strength.
-    """
-
-    def local_step(
-        self,
-        global_state_dict: Dict[str, Tensor],
-        reference_state_dict: Optional[Dict[str, Tensor]] = None,
-    ) -> Dict[str, Tensor]:
-        if not self.config.skip_redundant_attack_training:
-            return super().local_step(global_state_dict, reference_state_dict)
-        # The Gaussian upload depends only on the global model. Training a local
-        # model first cannot affect the returned state and wastes a full epoch.
         reference = reference_state_dict or global_state_dict
-        return self._postprocess_upload(reference, reference)
-
-    def _postprocess_upload(
-        self,
-        global_state_dict: Dict[str, Tensor],
-        local_state_dict: Dict[str, Tensor],
-    ) -> Dict[str, Tensor]:
-        scale = float(self.config.gaussian_sigma)
-        noisy: Dict[str, Tensor] = {}
-        for k, v in global_state_dict.items():
-            t = v.detach().cpu()
-            if t.is_floating_point():
-                tf = t.float()
-                mu = tf.mean()
-                std = tf.std(unbiased=False).clamp_min(1e-8)
-                eps = torch.randn_like(tf)
-                out = mu + scale * std * eps
-                noisy[k] = out.to(dtype=t.dtype).clone()
-            else:
-                noisy[k] = t.clone()
-        return noisy
+        return self._postprocess_upload(reference, model.state_dict())
 
 
-class LabelFlippingClient(MaliciousClientBase):
-    """Train with symmetric label flip y' = (C-1) - y for C-way classification."""
-
-    def _transform_batch(self, x: Tensor, y: Tensor) -> Tuple[Tensor, Tensor]:
-        c = int(self.config.num_classes)
-        return x, ((c - 1) - y)
-
-
-class SignFlippingClient(MaliciousClientBase):
-    """Train normally, then upload global - scale * (local - global)."""
-
-    def _postprocess_upload(
-        self,
-        global_state_dict: Dict[str, Tensor],
-        local_state_dict: Dict[str, Tensor],
-    ) -> Dict[str, Tensor]:
-        scale = self.config.sign_flip_scale
-
-        flipped: Dict[str, Tensor] = {}
-        for k, v_global in global_state_dict.items():
-            v_local = local_state_dict[k].detach().cpu()
-            g = v_global.detach().cpu()
-            if g.is_floating_point():
-                flipped[k] = (g - scale * (v_local - g)).clone()
-            else:
-                flipped[k] = g.clone()
-        return flipped
-
-
-class BackdoorClient(MaliciousClientBase):
-    """Backdoor attack client.
-
-    Inject a small square trigger into a fraction of local training samples,
-    and relabel them to a target label to implant a backdoor.
-    """
-
-    def _transform_batch(self, x: Tensor, y: Tensor) -> Tuple[Tensor, Tensor]:
-        poison_ratio = float(self.config.backdoor_poison_ratio)
-        target = int(self.config.backdoor_target_label)
-        s = int(self.config.backdoor_trigger_size)
-        val = float(self.config.backdoor_trigger_value)
-
-        if poison_ratio > 0.0 and s > 0:
-            mask = torch.rand(y.shape[0], device=self.device) < poison_ratio
-            if mask.any():
-                y_poison = y.clone()
-                # Image input: stamp a square trigger.
-                if x.ndim == 4:
-                    x_poison = x.clone()
-                    x_poison[mask, :, -s:, -s:] = val
-                else:
-                    # Text / tabular inputs: fall back to target-label poisoning only.
-                    x_poison = x
-                y_poison[mask] = target
-                return x_poison, y_poison
-        return x, y
-
-    def _postprocess_upload(
-        self,
-        global_state_dict: Dict[str, Tensor],
-        local_state_dict: Dict[str, Tensor],
-    ) -> Dict[str, Tensor]:
-        scale = float(self.config.backdoor_model_replace_scale)
-        if scale <= 0:
-            scale = 1.0
-
-        attacked: Dict[str, Tensor] = {}
-        for k, v_global in global_state_dict.items():
-            g = v_global.detach().cpu()
-            v_local = local_state_dict[k].detach().cpu()
-            if g.is_floating_point():
-                attacked[k] = (g + scale * (v_local - g)).clone()
-            else:
-                attacked[k] = g.clone()
-        return attacked
-
-
-class LieAttackClient(MaliciousClientBase):
-    """LIE/ALIE attack client.
-
-    Important: standard ALIE construction needs *all malicious clients'*
-    updates in the same round (see `article2/article/experiment.md`).
-
-    Therefore, this client only performs normal local training and uploads
-    its model update. The ALIE伪装/重写逻辑 is applied in `new/main.py`
-    after collecting all client updates.
-    """
-
-    def local_step(
-        self,
-        global_state_dict: Dict[str, Tensor],
-        reference_state_dict: Optional[Dict[str, Tensor]] = None,
-    ) -> Dict[str, Tensor]:
-        if not self.config.skip_redundant_attack_training:
-            return super().local_step(global_state_dict, reference_state_dict)
-        # _apply_lie_attack replaces every malicious upload after benign updates
-        # are collected, so local SGD here has no observable effect.
-        return reference_state_dict or global_state_dict
-
-
-def mixed_attack_for_client(config: FedConfig, client_id: int) -> str:
-    """Return the deterministic attack assigned to a mixed-attack client."""
-    raw = str(getattr(config, "mixed_attack_types", "lf,bd,gn"))
-    attack_ids = [item.strip().lower() for item in raw.split(",") if item.strip()]
-    attack_ids = [item for item in attack_ids if item not in {"none", "mix"}]
-    if not attack_ids:
-        raise ValueError("mixed_attack_types must contain at least one non-empty attack id.")
-    return attack_ids[(int(client_id) - int(config.num_benign)) % len(attack_ids)]
-
-
-class MixedAttackClient(MaliciousClientBase):
-    """Deterministically compose different attacks across malicious clients.
-
-    A mixed run is intentionally client-composed rather than round-random: it
-    allows the evaluator to attribute detection errors to a known attack family
-    while still exercising simultaneous LF/backdoor/model-poisoning traffic.
-    LIE clients are rewritten centrally after all benign updates are collected.
-    """
-
-    def __init__(self, client_id, device, config, loader, model_fn) -> None:
-        super().__init__(client_id, device, config, loader, model_fn)
-        self.attack_id = mixed_attack_for_client(config, client_id)
-        attack_cls = ATTACK_REGISTRY.get(self.attack_id)
-        if attack_cls is None or self.attack_id == "mix":
-            raise ValueError(
-                f"Unknown mixed attack {self.attack_id!r}; "
-                f"available: {sorted(ATTACK_REGISTRY)}"
-            )
-        self.delegate = attack_cls(client_id, device, config, loader, model_fn)
-
-    def local_step(self, global_state_dict, reference_state_dict=None):
-        return self.delegate.local_step(global_state_dict, reference_state_dict)
-
-
-ATTACK_REGISTRY: Dict[str, Type[BaseClient]] = {
-    # Explicit clean baseline.  The sweep runner also forces all clients to be
-    # benign for this attack id, so detection metrics are not contaminated by
-    # synthetic malicious labels.
-    "none": BenignClient,
-    "mix": MixedAttackClient,
-    "gn": GaussianNoiseClient,
-    "lf": LabelFlippingClient,
-    "sf": SignFlippingClient,
-    "bd": BackdoorClient,
-    "lie": LieAttackClient,
-}
+__all__ = ["BaseClient", "BenignClient", "ModelFactory"]

@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from src.config import FedConfig
-from src.server import SVDDServer
+from src.defenses import DefenseContext, SVDDDefense
 from src.utils import (
     build_svdd_feature_matrix,
     extract_bn_features,
@@ -123,14 +123,14 @@ def test_svdd_phase1_outputs_match_between_input_modes() -> None:
         return _TinyBNModel()
 
     d_bn = extract_bn_features(model_fn().state_dict()).numel()
-    server_absolute = SVDDServer(
+    server_absolute = SVDDDefense(
         cfg_absolute,
         d_bn=d_bn,
         device=torch.device("cpu"),
         model_fn=model_fn,
         svdd_feature_extractor=extract_bn_features,
     )
-    server_delta = SVDDServer(
+    server_delta = SVDDDefense(
         cfg_delta,
         d_bn=d_bn,
         device=torch.device("cpu"),
@@ -143,8 +143,12 @@ def test_svdd_phase1_outputs_match_between_input_modes() -> None:
     reference = server_absolute.state_dict_for_clients()
     clients = _make_distinct_client_states(reference)
 
-    stats_absolute = server_absolute.aggregate(1, copy.deepcopy(clients))
-    stats_delta = server_delta.aggregate(1, copy.deepcopy(clients))
+    stats_absolute = server_absolute.aggregate(
+        DefenseContext(1, reference, copy.deepcopy(clients))
+    )
+    stats_delta = server_delta.aggregate(
+        DefenseContext(1, reference, copy.deepcopy(clients))
+    )
 
     assert torch.allclose(stats_absolute.d, stats_delta.d, atol=2e-4, rtol=2e-4)
     assert torch.equal(stats_absolute.m, stats_delta.m)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Callable, Dict, Iterable, List
 
 import torch
@@ -126,7 +127,11 @@ def build_svdd_feature_matrix(
     return torch.stack(feat_list, dim=0)
 
 
-def robust_scale_features(x: Tensor) -> Tensor:
+def robust_scale_features(
+    x: Tensor,
+    *,
+    clip_value: float | None = None,
+) -> Tensor:
     """Robust feature-wise scaling using median and MAD.
 
     This normalizes each BN feature dimension to reduce the influence of outliers
@@ -136,10 +141,27 @@ def robust_scale_features(x: Tensor) -> Tensor:
     if x.ndim != 2:
         raise ValueError(f"Expected 2D tensor for BN features, got {x.ndim}D.")
 
-    med = x.median(dim=0).values
-    mad = (x - med).abs().median(dim=0).values
+    safe = torch.nan_to_num(
+        x.float(),
+        nan=0.0,
+        posinf=torch.finfo(torch.float32).max,
+        neginf=torch.finfo(torch.float32).min,
+    )
+    med = safe.median(dim=0).values
+    mad = (safe - med).abs().median(dim=0).values
     mad = mad.clamp_min(1e-4)
-    return (x - med) / mad
+    scaled = torch.nan_to_num(
+        (safe - med) / mad,
+        nan=0.0,
+        posinf=torch.finfo(torch.float32).max,
+        neginf=torch.finfo(torch.float32).min,
+    )
+    if clip_value is not None:
+        clip = float(clip_value)
+        if not math.isfinite(clip) or clip <= 0.0:
+            raise ValueError("clip_value must be a positive finite number.")
+        scaled = scaled.clamp(min=-clip, max=clip)
+    return scaled
 
 
 def mad(x: Tensor) -> Tensor:

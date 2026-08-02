@@ -41,6 +41,7 @@ class WarmupPhase:
             show_detection=True,
             monitor_items=[
                 ("Defense", "SVDD"),
+                ("Phase-1 Selector", str(defense.config.phase1_selection)),
                 ("Feature Mode", str(defense.config.svdd_feature_mode)),
                 ("Kept clients", f"{kept}/{total}"),
                 ("Center L2-Norm", f"{center_norm:.6f}"),

@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from src.config import FedConfig, normalize_defense_name
-from src.server import DEFENSE_REGISTRY, FedDMCServer
+from src.defenses import DEFENSE_REGISTRY, DMCDefense, DefenseContext
 
 
 class _TinyNet(nn.Module):
@@ -17,7 +17,7 @@ class _TinyNet(nn.Module):
         self.fc = nn.Linear(4, 2)
 
 
-def _states(server: FedDMCServer, k: int = 6) -> list[dict[str, torch.Tensor]]:
+def _states(server: DMCDefense, k: int = 6) -> list[dict[str, torch.Tensor]]:
     base = server.state_dict_for_clients()
     out = []
     for i in range(k):
@@ -37,12 +37,14 @@ def test_dmc_registry_and_alias() -> None:
 
 def test_dmc_shapes_and_normalized_weights() -> None:
     cfg = FedConfig(num_clients=6, num_benign=4, dmc_warmup_rounds=1)
-    server = FedDMCServer(cfg, d_bn=8, device=torch.device("cpu"), model_fn=_TinyNet)
-    stats = server.aggregate(round_idx=1, client_state_dicts=_states(server))
+    server = DMCDefense(cfg, d_bn=8, device=torch.device("cpu"), model_fn=_TinyNet)
+    states = _states(server)
+    stats = server.aggregate(
+        DefenseContext(1, server.state_dict_for_clients(), states)
+    )
     assert stats.d.shape == (6,)
     assert stats.m.shape == (6,)
     assert stats.alpha.shape == (6,)
     assert torch.isfinite(stats.d).all()
     assert torch.isfinite(stats.alpha).all()
     assert abs(float(stats.alpha.sum()) - 1.0) < 1e-5
-

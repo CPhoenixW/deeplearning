@@ -1,4 +1,4 @@
-"""Smoke tests for recently ported defense servers."""
+"""Smoke tests for the canonical defense strategies."""
 
 from __future__ import annotations
 
@@ -7,7 +7,14 @@ import copy
 import torch
 
 from src.config import FedConfig, normalize_defense_name
-from src.server import DEFENSE_REGISTRY, AlignInsServer, BNGuardServer, FLANDERSServer, FLGMMServer
+from src.defenses import (
+    DEFENSE_REGISTRY,
+    AlignInsDefense,
+    BNGuardDefense,
+    DefenseContext,
+    FLANDERSDefense,
+    FLGMMDefense,
+)
 from src.tasks import TASK_REGISTRY
 
 
@@ -41,9 +48,11 @@ def test_alignins_aggregate_smoke() -> None:
     def model_fn():
         return task.build_model()
 
-    server = AlignInsServer(cfg, d_bn=128, device=device, model_fn=model_fn)
+    server = AlignInsDefense(cfg, d_bn=128, device=device, model_fn=model_fn)
     client_sds = _make_client_states(server.global_model, k=5)
-    stats = server.aggregate(round_idx=1, client_state_dicts=client_sds)
+    stats = server.aggregate(
+        DefenseContext(1, server.state_dict_for_clients(), client_sds)
+    )
 
     assert stats.d.shape == (5,)
     assert stats.m.shape == (5,)
@@ -61,9 +70,11 @@ def test_bnguard_aggregate_smoke() -> None:
     def model_fn():
         return task.build_model()
 
-    server = BNGuardServer(cfg, d_bn=128, device=device, model_fn=model_fn)
+    server = BNGuardDefense(cfg, d_bn=128, device=device, model_fn=model_fn)
     client_sds = _make_client_states(server.global_model, k=5)
-    stats = server.aggregate(round_idx=1, client_state_dicts=client_sds)
+    stats = server.aggregate(
+        DefenseContext(1, server.state_dict_for_clients(), client_sds)
+    )
 
     assert stats.d.shape == (5,)
     assert stats.m.shape == (5,)
@@ -83,16 +94,20 @@ def test_flgmm_aggregate_smoke() -> None:
     def model_fn():
         return task.build_model()
 
-    server = FLGMMServer(cfg, d_bn=128, device=device, model_fn=model_fn)
+    server = FLGMMDefense(cfg, d_bn=128, device=device, model_fn=model_fn)
     client_sds = _make_client_states(server.global_model, k=5)
-    stats = server.aggregate(round_idx=1, client_state_dicts=client_sds)
+    stats = server.aggregate(
+        DefenseContext(1, server.state_dict_for_clients(), client_sds)
+    )
     assert stats.d.shape == (5,)
     assert stats.m.shape == (5,)
     assert abs(float(stats.alpha.sum().item()) - 1.0) < 1e-5
     assert torch.isfinite(stats.d).all()
 
     client_sds = _make_client_states(server.global_model, k=5)
-    stats = server.aggregate(round_idx=2, client_state_dicts=client_sds)
+    stats = server.aggregate(
+        DefenseContext(2, server.state_dict_for_clients(), client_sds)
+    )
     assert stats.d.shape == (5,)
     assert stats.m.shape == (5,)
     assert abs(float(stats.alpha.sum().item()) - 1.0) < 1e-5
@@ -110,16 +125,20 @@ def test_flanders_aggregate_smoke() -> None:
     def model_fn():
         return task.build_model()
 
-    server = FLANDERSServer(cfg, d_bn=128, device=device, model_fn=model_fn)
+    server = FLANDERSDefense(cfg, d_bn=128, device=device, model_fn=model_fn)
     client_sds = _make_client_states(server.global_model, k=5)
-    stats = server.aggregate(round_idx=1, client_state_dicts=client_sds)
+    stats = server.aggregate(
+        DefenseContext(1, server.state_dict_for_clients(), client_sds)
+    )
     assert stats.d.shape == (5,)
     assert stats.m.shape == (5,)
     assert abs(float(stats.alpha.sum().item()) - 1.0) < 1e-5
     assert torch.isfinite(stats.d).all()
 
     client_sds = _make_client_states(server.global_model, k=5)
-    stats = server.aggregate(round_idx=2, client_state_dicts=client_sds)
+    stats = server.aggregate(
+        DefenseContext(2, server.state_dict_for_clients(), client_sds)
+    )
     assert stats.d.shape == (5,)
     assert stats.m.shape == (5,)
     assert abs(float(stats.alpha.sum().item()) - 1.0) < 1e-5

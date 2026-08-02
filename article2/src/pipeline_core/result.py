@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
+from ..attacks import attack_metadata
 from ..reporting.reporters import get_reporter
-from ..clients import mixed_attack_for_client
 from .contracts import PipelineContext
 
 
@@ -57,14 +57,7 @@ class StructuredResultWriter:
             "planned_rounds": cfg.total_rounds,
             "config_files": dict(self.context.config_files),
             "applied_hyperparameters": dict(self.context.applied_hyperparameters),
-            "mixed_attack_types": getattr(cfg, "mixed_attack_types", "lf,bd,gn"),
-            "mixed_attack_assignments": (
-                {
-                    str(cid): mixed_attack_for_client(cfg, cid)
-                    for cid in range(cfg.num_benign, cfg.num_clients)
-                }
-                if self.context.attack_name == "mix" else {}
-            ),
+            **attack_metadata(self.context.attack_name, cfg),
         }
         for attempt in range(100):
             run_id = timestamp if attempt == 0 else f"{timestamp}-{attempt}"
@@ -115,14 +108,7 @@ class StructuredResultWriter:
                 "total_rounds": cfg.total_rounds,
                 "config_files": dict(self.context.config_files),
                 "applied_hyperparameters": dict(self.context.applied_hyperparameters),
-                "mixed_attack_types": getattr(cfg, "mixed_attack_types", "lf,bd,gn"),
-                "mixed_attack_assignments": (
-                    {
-                        str(cid): mixed_attack_for_client(cfg, cid)
-                        for cid in range(cfg.num_benign, cfg.num_clients)
-                    }
-                    if self.context.attack_name == "mix" else {}
-                ),
+                **attack_metadata(self.context.attack_name, cfg),
             },
             "rounds": self.context.rounds,
         }

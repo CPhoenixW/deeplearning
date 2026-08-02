@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
+from typing import Any, Callable, Dict, List, Protocol, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -96,34 +96,9 @@ class BaseDefense:
             return self.device
         return torch.device("cpu")
 
-    def aggregate(
-        self,
-        context: Optional[DefenseContext] = None,
-        positional_client_states: Optional[List[Dict[str, Tensor]]] = None,
-        *,
-        round_idx: Optional[int] = None,
-        client_state_dicts: Optional[List[Dict[str, Tensor]]] = None,
-    ) -> DefenseResult:
-        """Execute the strategy through the context API.
+    def aggregate(self, context: DefenseContext) -> DefenseResult:
+        """Execute one communication round through the canonical context API."""
 
-        Keyword arguments are retained only for focused legacy tests; the new
-        pipeline always supplies ``DefenseContext``.
-        """
-
-        if isinstance(context, int):
-            if positional_client_states is None:
-                raise TypeError("aggregate(round_idx, client_state_dicts) requires both arguments")
-            round_idx = int(context)
-            client_state_dicts = positional_client_states
-            context = None
-        if context is None:
-            if round_idx is None or client_state_dicts is None:
-                raise TypeError("aggregate requires DefenseContext")
-            context = DefenseContext(
-                round_idx=round_idx,
-                global_state=self.state_dict_for_clients(),
-                client_states=client_state_dicts,
-            )
         result = self._aggregate(context.round_idx, context.client_states)
         return self._finalize_result(result)
 
@@ -161,16 +136,9 @@ class BaseDefense:
         return result
 
 
-# Compatibility names for older imports. New code uses BaseDefense/DefenseResult.
-BaseServer = BaseDefense
-RoundStats = DefenseResult
-
-
 __all__ = [
     "BaseDefense",
-    "BaseServer",
     "DefenseContext",
     "DefenseResult",
     "DefenseStrategy",
-    "RoundStats",
 ]

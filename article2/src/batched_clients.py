@@ -7,12 +7,8 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.func import functional_call, grad, vmap
 
-try:
-    from .clients import BenignClient
-    from .config import FedConfig
-except ImportError:
-    from clients import BenignClient
-    from config import FedConfig
+from .clients import BenignClient
+from .config import FedConfig
 
 
 class BatchedClientExecutor:

@@ -204,11 +204,11 @@ class SVDDDefense(BaseDefense):
     def phase1_step(
         self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]
     ) -> Tuple[float, float, float, Tensor, Tensor]:
-        """AE warm-up: train AE and FedAvg using only the closest clients in feature space.
+        """Train the AE and select the trusted Phase-1 clients.
 
-        Distance = L2 norm to the coordinate-wise median of robust-scaled SVDD features
-        across all clients this round. Keep ``ae_warmup_keep_ratio`` of clients with
-        smallest distance (at least one).
+        ``reconstruction`` trains on all finite rows before retaining the clients
+        with the smallest post-update reconstruction errors. ``feature_median``
+        retains the legacy median-distance rule for the documented ablation.
 
         Returns:
             center_norm, z_variance, ae_loss,
@@ -223,31 +223,31 @@ class SVDDDefense(BaseDefense):
         num_finite = int(finite_rows.sum().item())
         num_keep = max(1, min(num_finite, int(round(ratio * K))))
 
-        ref = X.median(dim=0).values
-        distances = torch.norm(X - ref.unsqueeze(0), dim=1)
-        distances = torch.where(
-            finite_rows,
-            distances,
-            torch.full_like(distances, float("inf")),
-        )
-        _, idx_keep = torch.topk(distances, k=num_keep, largest=False)
-        idx_keep = torch.sort(idx_keep).values
-
-        keep_mask = torch.zeros(K, dtype=torch.bool)
-        keep_mask[idx_keep] = True
-
-        self.ae.eval()
-        with torch.no_grad():
-            X_dev = X.to(self.device)
-            x_hat_cur = self.ae(X_dev)
-            per_client_loss = self.reconstruction_objective(x_hat_cur, X_dev)
-            per_client_loss = torch.where(
-                finite_rows.to(self.device),
-                per_client_loss,
-                torch.full_like(per_client_loss, float("inf")),
+        selection = str(
+            getattr(self.config, "phase1_selection", "reconstruction")
+        ).lower().strip()
+        if selection not in {"reconstruction", "feature_median"}:
+            raise ValueError(
+                "phase1_selection must be 'reconstruction' or "
+                f"'feature_median', got {selection!r}."
             )
 
-        X_train = X[idx_keep].to(self.device)
+        finite_indices = torch.where(finite_rows)[0]
+        idx_keep: Tensor | None = None
+        if selection == "feature_median":
+            reference = X[finite_rows].median(dim=0).values
+            selector_scores = torch.norm(X - reference.unsqueeze(0), dim=1)
+            selector_scores = torch.where(
+                finite_rows,
+                selector_scores,
+                torch.full_like(selector_scores, float("inf")),
+            )
+            idx_keep = torch.topk(
+                selector_scores, k=num_keep, largest=False
+            ).indices.sort().values
+            X_train = X[idx_keep].to(self.device)
+        else:
+            X_train = X[finite_indices].to(self.device)
 
         self.ae.train()
         x_hat = self.ae(X_train)
@@ -255,6 +255,26 @@ class SVDDDefense(BaseDefense):
         loss = per_sample_loss.mean()
 
         self._safe_ae_step(loss, self.config.ae_grad_clip)
+
+        self.ae.eval()
+        with torch.no_grad():
+            X_device = X.to(self.device)
+            per_client_loss = self.reconstruction_objective(
+                self.ae(X_device), X_device
+            )
+            per_client_loss = torch.where(
+                finite_rows.to(self.device),
+                per_client_loss,
+                torch.full_like(per_client_loss, float("inf")),
+            )
+        if selection == "reconstruction":
+            idx_keep = torch.topk(
+                per_client_loss, k=num_keep, largest=False
+            ).indices.detach().cpu().sort().values
+        assert idx_keep is not None
+
+        keep_mask = torch.zeros(K, dtype=torch.bool)
+        keep_mask[idx_keep] = True
 
         selected_sds = [client_state_dicts[int(i)] for i in idx_keep.tolist()]
         alpha_sel = torch.full((num_keep,), 1.0 / float(num_keep))
@@ -271,7 +291,13 @@ class SVDDDefense(BaseDefense):
             z_var = Z.var().item()
             center_norm = 0.0 if self.c is None else float(self.c.norm().item())
 
-        return center_norm, z_var, float(loss.item()), per_client_loss.detach().cpu(), keep_mask.detach().cpu()
+        return (
+            center_norm,
+            z_var,
+            float(loss.item()),
+            per_client_loss.detach().cpu(),
+            keep_mask.detach().cpu(),
+        )
     
     def init_center(self, client_state_dicts: List[Dict[str, Tensor]]) -> Tuple[float, float]:
         """Initialize SVDD center c using well-reconstructed clients."""

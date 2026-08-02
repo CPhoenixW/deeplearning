@@ -1,21 +1,9 @@
-"""
-Federated learning with AE-SVDD defenses (CIFAR-10, Fashion-MNIST, AG News).
+"""JSON-driven federated malicious-client detection experiments.
 
-Layout (project root = parent of ``src/``)::
-
-    article2/
-      src/          # Python package (this directory)
-      data/         # datasets (CIFAR-10, Fashion-MNIST, AG News cache, …)
-      log/          # experiment JSON outputs from ``run_matrix`` / ``run_silent``
-
-Default ``data_root`` / ``run_matrix --log-dir`` are resolved from the project
-root (parent of ``src/``), not from the process working directory.
-
-Typical invocation::
-
-    python -m src.run_matrix --list
-    python -m src.run_matrix --task ag_news --defenses svdd --rounds 50
-    python -m src.run_silent --task cifar10 --attacks none,gn,lf,sf,lie,bd --defenses dmc --rounds 50
+The only experiment execution path is ``python -m src.pipeline --config ...``.
+Client attack implementations, including mixed attack composition, live
+exclusively in :mod:`src.attacks`.
+Defense implementations live exclusively in :mod:`src.defenses`.
 """
 
 __all__: list[str] = []

@@ -1,6 +1,6 @@
 import torch
 
-from src.clients import ATTACK_REGISTRY, mixed_attack_for_client
+from src.attacks import ATTACK_REGISTRY, mixed_attack_for_client
 from src.config import FedConfig, normalize_attack_name
 from src.fixed_descriptor import FixedHierarchicalMultiViewDescriptor
 from src.models import FashionCNN, LeNetClassifier
@@ -14,6 +14,10 @@ def test_mixed_attack_assignment_is_deterministic():
     assert normalize_attack_name("hybrid") == "mix"
     assert [mixed_attack_for_client(cfg, cid) for cid in range(6, 10)] == ["lf", "bd", "gn", "lie"]
     assert "mix" in ATTACK_REGISTRY
+    assert all(
+        attack_id == "none" or attack.__module__.startswith("src.attacks.")
+        for attack_id, attack in ATTACK_REGISTRY.items()
+    )
 
 
 def test_mnist_task_is_registered():
@@ -59,6 +63,10 @@ def test_grayscale_tasks_use_distinct_native_models_and_fixed_descriptor():
 def test_modular_pipeline_registry_and_hyperparameters():
     assert "svdd" in DEFENSE_REGISTRY
     assert "dmc" in DEFENSE_REGISTRY
+    assert all(
+        defense.__module__.startswith("src.defenses.")
+        for defense in DEFENSE_REGISTRY.values()
+    )
     assert FedConfig().svdd_feature_mode == "fixed_projection"
     table = load_hyperparameter_table("configs/hyperparameters.json")
     values = resolve_hyperparameters(table, "lf", "svdd", "cifar10")
