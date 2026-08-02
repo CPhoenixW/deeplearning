@@ -42,9 +42,26 @@ def _compute_svdd_keep_mask(
     med_d = torch.median(finite_d)
     mad_d = 1.4826 * torch.median((finite_d - med_d).abs())
     mad_d = torch.clamp(mad_d, min=1e-6)
-    warmup_rounds = max(1, int(config.svdd_warmup_rounds))
-    p_tau = min(1.0, max(0.0, svdd_round / float(warmup_rounds)))
+    legacy_rounds = getattr(config, "svdd_warmup_rounds", None)
+    anneal_rounds = max(
+        1,
+        int(
+            legacy_rounds
+            if legacy_rounds is not None
+            else getattr(config, "tau_anneal_rounds", 100)
+        ),
+    )
+    # Phase-2 round 1 uses tau_start exactly; its final scheduled round uses
+    # tau_end exactly.  This makes the parameter name and search range literal.
+    denominator = max(1, anneal_rounds - 1)
+    p_tau = min(1.0, max(0.0, (svdd_round - 1) / float(denominator)))
     if config.tau_start > 0.0 and config.tau_end > 0.0:
+        if not math.isfinite(float(config.tau_start)) or not math.isfinite(
+            float(config.tau_end)
+        ):
+            raise ValueError("tau_start and tau_end must be finite.")
+        if float(config.tau_end) > float(config.tau_start):
+            raise ValueError("tau_end must be less than or equal to tau_start.")
         tau = config.tau_start - p_tau * (config.tau_start - config.tau_end)
     else:
         tau = config.tau_multiplier

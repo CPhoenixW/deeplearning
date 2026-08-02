@@ -19,7 +19,7 @@
   },
   "defenses": {
     "svdd": {
-      "svdd_warmup_rounds": 100,
+      "tau_anneal_rounds": 100,
       "center_ema_decay": 0.9,
       "tau_start": 3,
       "tau_end": 2,

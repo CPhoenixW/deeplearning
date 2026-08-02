@@ -165,7 +165,11 @@ class FedConfig:
     dmc_score_ema_decay: float = 0.7
 
     # --- SVDD ---
-    svdd_warmup_rounds: int = 100
+    # Number of Phase-2 rounds used to anneal tau_start -> tau_end.
+    tau_anneal_rounds: int = 100
+    # Deprecated JSON/API alias.  When set, it overrides tau_anneal_rounds so
+    # historical experiment configurations remain reproducible.
+    svdd_warmup_rounds: int | None = None
     center_ema_decay: float = 0.9
     # Threshold schedule for SVDD filtering:
     # threshold = median(d) + tau * MAD(d)
