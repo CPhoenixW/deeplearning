@@ -363,10 +363,17 @@ def run_trials(
     manifest: Mapping[str, Any],
     trials: Sequence[Trial],
     *,
-    gpu: int,
+    gpu: int | Sequence[int],
     workers: int,
     force: bool,
 ) -> None:
+    gpu_ids = [int(gpu)] if isinstance(gpu, int) else [int(item) for item in gpu]
+    if not gpu_ids:
+        raise ValueError("At least one GPU id is required")
+    if len(set(gpu_ids)) != len(gpu_ids) or any(item < 0 for item in gpu_ids):
+        raise ValueError(f"GPU ids must be unique non-negative integers: {gpu_ids}")
+    if workers < 1:
+        raise ValueError("workers_per_gpu must be at least 1")
     jobs: List[tuple[str, Path, Path, str]] = []
     generated_root = _resolve(
         str(manifest.get("generated_config_dir", "configs/stage_b/generated"))
@@ -394,7 +401,8 @@ def run_trials(
                 )
             )
     print(
-        f"SVDD calibration jobs={len(jobs)} workers={workers} gpu={gpu} "
+        f"SVDD calibration jobs={len(jobs)} gpus={gpu_ids} "
+        f"workers_per_gpu={workers} total_workers={len(gpu_ids) * workers} "
         f"candidates={len(trials)}"
     )
     if not jobs:
@@ -408,7 +416,7 @@ def run_trials(
     python = _python_binary(manifest)
     cpu_threads = str(int(manifest.get("cpu_threads_per_worker", 4)))
 
-    def worker(worker_id: int) -> None:
+    def worker(gpu_id: int, worker_id: int) -> None:
         while True:
             try:
                 name, config_path, output_dir, _defense = work.get_nowait()
@@ -420,7 +428,7 @@ def run_trials(
             env.update(
                 {
                     "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-                    "CUDA_VISIBLE_DEVICES": str(gpu),
+                    "CUDA_VISIBLE_DEVICES": str(gpu_id),
                     "MKL_NUM_THREADS": cpu_threads,
                     "OMP_NUM_THREADS": cpu_threads,
                     "OPENBLAS_NUM_THREADS": cpu_threads,
@@ -428,7 +436,7 @@ def run_trials(
                 }
             )
             with lock:
-                print(f"[GPU {gpu}/W{worker_id}] START {name}", flush=True)
+                print(f"[GPU {gpu_id}/W{worker_id}] START {name}", flush=True)
             with console_path.open("a", encoding="utf-8") as console:
                 completed = subprocess.run(
                     [python, "-u", "-m", "src.pipeline", "--config", str(config_path)],
@@ -440,17 +448,21 @@ def run_trials(
                 )
             with lock:
                 if completed.returncode == 0:
-                    print(f"[GPU {gpu}/W{worker_id}] DONE  {name}", flush=True)
+                    print(f"[GPU {gpu_id}/W{worker_id}] DONE  {name}", flush=True)
                 else:
                     failures.append((name, completed.returncode))
                     print(
-                        f"[GPU {gpu}/W{worker_id}] FAIL  {name} "
+                        f"[GPU {gpu_id}/W{worker_id}] FAIL  {name} "
                         f"exit={completed.returncode} log={console_path}",
                         flush=True,
                     )
             work.task_done()
 
-    threads = [threading.Thread(target=worker, args=(index,)) for index in range(workers)]
+    threads = [
+        threading.Thread(target=worker, args=(gpu_id, worker_id))
+        for gpu_id in gpu_ids
+        for worker_id in range(workers)
+    ]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -706,7 +718,12 @@ def main() -> None:
     commands.add_parser("plan")
     commands.add_parser("generate")
     run = commands.add_parser("run")
-    run.add_argument("--gpu", type=int)
+    gpu_group = run.add_mutually_exclusive_group()
+    gpu_group.add_argument("--gpu", type=int)
+    gpu_group.add_argument(
+        "--gpus",
+        help="Comma-separated GPU ids sharing one calibration job queue",
+    )
     run.add_argument("--workers", type=int)
     run.add_argument("--limit", type=int)
     run.add_argument("--force", action="store_true")
@@ -734,10 +751,26 @@ def main() -> None:
         return
     if args.command == "run":
         selected = trials[: args.limit] if args.limit else trials
+        if args.gpus is not None:
+            gpu_ids = [
+                int(item.strip())
+                for item in str(args.gpus).split(",")
+                if item.strip()
+            ]
+            gpu_selection: int | Sequence[int] = gpu_ids
+        elif args.gpu is not None:
+            gpu_selection = int(args.gpu)
+        else:
+            configured_gpus = manifest.get("gpus")
+            gpu_selection = (
+                [int(item) for item in configured_gpus]
+                if isinstance(configured_gpus, list)
+                else int(manifest.get("gpu", 0))
+            )
         run_trials(
             manifest,
             selected,
-            gpu=int(args.gpu if args.gpu is not None else manifest.get("gpu", 0)),
+            gpu=gpu_selection,
             workers=int(
                 args.workers
                 if args.workers is not None

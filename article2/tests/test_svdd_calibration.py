@@ -8,6 +8,7 @@ from tools.svdd_calibration import (
     _effective_matches,
     build_candidates,
     promote_manifest,
+    run_trials,
 )
 
 
@@ -108,3 +109,11 @@ def test_completion_accepts_pipeline_all_benign_no_attack_control() -> None:
     }
     assert _effective_matches(no_attack, expected, defense="svdd")
     assert _effective_matches(attacked, expected, defense="svdd")
+
+
+def test_run_rejects_invalid_multi_gpu_worker_layout() -> None:
+    manifest = _manifest()
+    with pytest.raises(ValueError, match="unique non-negative"):
+        run_trials(manifest, [], gpu=[0, 0], workers=2, force=False)
+    with pytest.raises(ValueError, match="workers_per_gpu"):
+        run_trials(manifest, [], gpu=[0, 1], workers=0, force=False)
