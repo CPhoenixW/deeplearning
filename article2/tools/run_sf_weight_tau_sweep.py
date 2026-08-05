@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Launch the three c002-based AE-SVDD recovery configurations.
+"""Launch c002-based AE-SVDD reconstruction-weight/tau configurations.
 
-Each variant is assigned to one GPU.  A variant worker runs all requested
+Each active variant is assigned to one GPU.  A variant worker runs all requested
 seeds sequentially on its GPU, and each pipeline JSON contains the complete
 attack matrix (clean, GN, LF, SF, BD, LIE, and Mix).  The runner is resumable:
 completed seed directories are skipped unless ``--force`` is supplied.
@@ -18,25 +18,49 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-VARIANTS: dict[str, dict[str, float]] = {
+VARIANTS: dict[str, dict[str, Any]] = {
     # The ratio in the names is recon_loss_weight:svdd_loss_weight.
     "recon2_tau32": {
         "svdd_loss_weight": 1.0,
         "recon_loss_weight": 2.0,
         "tau_start": 3.0,
         "tau_end": 2.0,
+        "tau_anneal_rounds": 100,
     },
     "recon4_tau32": {
         "svdd_loss_weight": 1.0,
         "recon_loss_weight": 4.0,
         "tau_start": 3.0,
         "tau_end": 2.0,
+        "tau_anneal_rounds": 100,
     },
     "recon2_tau21": {
         "svdd_loss_weight": 1.0,
         "recon_loss_weight": 2.0,
         "tau_start": 2.0,
         "tau_end": 1.0,
+        "tau_anneal_rounds": 150,
+    },
+    "recon4_tau21": {
+        "svdd_loss_weight": 1.0,
+        "recon_loss_weight": 4.0,
+        "tau_start": 2.0,
+        "tau_end": 1.0,
+        "tau_anneal_rounds": 150,
+    },
+    "recon2_tau31": {
+        "svdd_loss_weight": 1.0,
+        "recon_loss_weight": 2.0,
+        "tau_start": 3.0,
+        "tau_end": 1.0,
+        "tau_anneal_rounds": 200,
+    },
+    "recon4_tau31": {
+        "svdd_loss_weight": 1.0,
+        "recon_loss_weight": 4.0,
+        "tau_start": 3.0,
+        "tau_end": 1.0,
+        "tau_anneal_rounds": 200,
     },
 }
 
@@ -180,22 +204,37 @@ def _write_attack_configs(
     return paths
 
 
-def _complete(output_dir: Path, attacks: Sequence[str], rounds: int) -> bool:
-    for attack in attacks:
-        path = output_dir / f"cifar10__{attack}__svdd.json"
-        if not path.exists():
+def _attack_complete(path: Path, *, variant: str, rounds: int) -> bool:
+    """Return whether one final result has the expected run contract."""
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    recorded_rounds = payload.get("rounds", [])
+    if not isinstance(recorded_rounds, list) or len(recorded_rounds) != int(rounds):
+        return False
+    meta = payload.get("meta", {})
+    effective = meta.get("effective_config", {}) if isinstance(meta, dict) else {}
+    if int(meta.get("total_rounds", -1)) != int(rounds):
+        return False
+    for key, value in VARIANTS[variant].items():
+        if effective.get(key) != value:
             return False
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            return False
-        if len(payload.get("rounds", [])) != int(rounds):
-            return False
-        effective = payload.get("meta", {}).get("effective_config", {})
-        for key, value in VARIANTS[output_dir.parent.name].items():
-            if effective.get(key) != value:
-                return False
     return True
+
+
+def _complete(output_dir: Path, attacks: Sequence[str], rounds: int) -> bool:
+    variant = output_dir.parent.name
+    return all(
+        _attack_complete(
+            output_dir / f"cifar10__{attack}__svdd.json",
+            variant=variant,
+            rounds=rounds,
+        )
+        for attack in attacks
+    )
 
 
 def _run_variant(
@@ -247,7 +286,11 @@ def _run_variant(
                 attack
                 for attack in attacks
                 if force
-                or not (output_dir / f"cifar10__{attack}__svdd.json").exists()
+                or not _attack_complete(
+                    output_dir / f"cifar10__{attack}__svdd.json",
+                    variant=variant,
+                    rounds=rounds,
+                )
             ]
             log.write(
                 f"SEED seed={seed} pending={pending} "
@@ -326,12 +369,12 @@ def main() -> int:
         "--variant",
         choices=[*VARIANTS, "all"],
         default="all",
-        help="Run one variant or all three; normally leave as all.",
+        help="Run one variant or all configured variants; all runs in GPU-sized waves.",
     )
     parser.add_argument(
         "--no-wait",
         action="store_true",
-        help="When running all variants, return after starting the three workers.",
+        help="Return after starting workers (only valid when one wave is sufficient).",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -353,8 +396,13 @@ def main() -> int:
 
     root = args.output_root.resolve()
     selected = list(VARIANTS) if args.variant == "all" else [args.variant]
+    if args.variant == "all" and args.no_wait and len(selected) > len(gpus):
+        parser.error(
+            "--no-wait cannot supervise multiple waves; run the command itself "
+            "under nohup without --no-wait"
+        )
     for index, variant in enumerate(selected):
-        gpu = int(gpus[index])
+        gpu = int(gpus[index % len(gpus)])
         print(
             f"{variant}: gpu={gpu} seeds={list(seeds)} attacks={list(attacks)} "
             f"rounds={args.rounds} params={VARIANTS[variant]}"
@@ -362,9 +410,8 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    # A single variant runs directly.  The all-variants mode forks one
-    # independent worker per GPU; otherwise the three assignments would only
-    # be labels and the experiments would execute serially.
+    # A single variant runs directly. The all-variants mode executes
+    # GPU-sized waves, so six variants on three GPUs become two waves.
     if args.variant != "all":
         return _run_variant(
             root=root,
@@ -379,55 +426,62 @@ def main() -> int:
         )
 
     root.mkdir(parents=True, exist_ok=True)
-    workers: list[tuple[str, subprocess.Popen[Any], Any]] = []
     script_path = Path(__file__).resolve()
-    for index, variant in enumerate(selected):
-        gpu = int(gpus[index])
-        variant_root = root / variant
-        variant_root.mkdir(parents=True, exist_ok=True)
-        supervisor_log = (variant_root / "supervisor.log").open("a", encoding="utf-8")
-        command = [
-            sys.executable,
-            str(script_path),
-            "--variant",
-            variant,
-            "--gpus",
-            str(gpu),
-            "--seeds",
-            ",".join(str(seed) for seed in seeds),
-            "--attacks",
-            ",".join(attacks),
-            "--rounds",
-            str(args.rounds),
-            "--attack-workers",
-            str(args.attack_workers),
-            "--output-root",
-            str(root),
-            "--python",
-            str(args.python_bin),
-        ]
-        if args.force:
-            command.append("--force")
-        process = subprocess.Popen(
-            command,
-            cwd=str(script_path.parents[1]),
-            stdout=supervisor_log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        workers.append((variant, process, supervisor_log))
-        print(f"started {variant} gpu={gpu} pid={process.pid}")
-    if args.no_wait:
-        for _variant, _process, log in workers:
-            log.close()
-        return 0
     result = 0
-    for variant, process, log in workers:
-        code = process.wait()
-        log.close()
-        print(f"finished {variant} returncode={code}")
-        if code and result == 0:
-            result = int(code)
+    for wave_start in range(0, len(selected), len(gpus)):
+        wave = selected[wave_start : wave_start + len(gpus)]
+        workers: list[tuple[str, subprocess.Popen[Any], Any]] = []
+        print(f"starting wave={1 + wave_start // len(gpus)} variants={wave}")
+        for gpu_index, variant in enumerate(wave):
+            gpu = int(gpus[gpu_index])
+            variant_root = root / variant
+            variant_root.mkdir(parents=True, exist_ok=True)
+            supervisor_log = (variant_root / "supervisor.log").open(
+                "a", encoding="utf-8"
+            )
+            command = [
+                sys.executable,
+                str(script_path),
+                "--variant",
+                variant,
+                "--gpus",
+                str(gpu),
+                "--seeds",
+                ",".join(str(seed) for seed in seeds),
+                "--attacks",
+                ",".join(attacks),
+                "--rounds",
+                str(args.rounds),
+                "--attack-workers",
+                str(args.attack_workers),
+                "--output-root",
+                str(root),
+                "--python",
+                str(args.python_bin),
+            ]
+            if args.force:
+                command.append("--force")
+            process = subprocess.Popen(
+                command,
+                cwd=str(script_path.parents[1]),
+                stdout=supervisor_log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            workers.append((variant, process, supervisor_log))
+            print(f"started {variant} gpu={gpu} pid={process.pid}")
+        if args.no_wait:
+            for _variant, _process, log in workers:
+                log.close()
+            return 0
+        for variant, process, log in workers:
+            code = process.wait()
+            log.close()
+            print(f"finished {variant} returncode={code}")
+            if code and result == 0:
+                result = int(code)
+        if result:
+            break
     return result
 
 
