@@ -113,12 +113,6 @@ class FedConfig:
 
     # --- Phase schedule ---
     phase1_rounds: int = 15
-    # Phase-1 client selection. ``reconstruction`` matches the paper hypothesis:
-    # model/gradient poisoning should have high AE reconstruction error. The
-    # legacy ``feature_median`` rule is retained for controlled ablation only.
-    phase1_selection: str = "reconstruction"
-    # Fraction retained during Phase 1 (at least one client).
-    ae_warmup_keep_ratio: float = 0.8
 
     # --- SOTA defenses (ported from experiment/FL-Byzantine-Library) ---
     # LASA: Layer-Adaptive Sparsified model Aggregation (WACV 2025)
@@ -165,27 +159,15 @@ class FedConfig:
     dmc_score_ema_decay: float = 0.7
 
     # --- SVDD ---
-    # Number of Phase-2 rounds used to anneal tau_start -> tau_end.
-    tau_anneal_rounds: int = 100
-    # Deprecated JSON/API alias.  When set, it overrides tau_anneal_rounds so
-    # historical experiment configurations remain reproducible.
-    svdd_warmup_rounds: int | None = None
     center_ema_decay: float = 0.9
-    # Threshold schedule for SVDD filtering:
-    # threshold = median(d) + tau * MAD(d)
-    # tau anneals linearly from tau_start to tau_end in Phase 2.
-    tau_start: float = 3.0
-    tau_end: float = 2.0
-    # Backward-compatible fixed tau; only used when tau_start/tau_end are invalid.
-    tau_multiplier: float = 3.0
     svdd_grad_clip: float = 1.0
-    svdd_loss_weight: float = 1.0
-    recon_loss_weight: float = 1.0
+    # Single tunable loss-mixing coefficient.  alpha=1 is pure SVDD;
+    # alpha=0 is pure reconstruction loss.
+    alpha: float = 0.5
     # Trusted-sample quantiles used by center initialization and Phase-2
     # reconstruction training. Values must be in (0, 1].
     center_init_quantile: float = 0.5
     phase2_recon_quantile: float = 0.8
-    svdd_max_keep_ratio: float = 1.0
     svdd_feature_clip: float = 10.0
 
     # --- Task (dataset + backbone) ---

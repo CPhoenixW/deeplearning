@@ -5,6 +5,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
+from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 
 from ..config import FedConfig
@@ -17,72 +18,16 @@ from ..utils import (
     weighted_fedavg,
 )
 from .base import BaseDefense, DefenseResult as RoundStats
-from .svdd_phases import (
-    FilteringPhase,
-    ReconstructionObjective,
-    SVDDObjective,
-    WarmupPhase,
-)
 
 
-def _compute_svdd_keep_mask(
-    d: Tensor,
-    svdd_round: int,
-    config: FedConfig,
-) -> Tuple[Tensor, float, float]:
-    """Apply the scheduled MAD threshold and an optional closest-client cap."""
+class ReconstructionObjective:
+    def __call__(self, prediction: Tensor, target: Tensor) -> Tensor:
+        return (prediction - target).abs().mean(dim=1)
 
-    if d.ndim != 1 or d.numel() == 0:
-        raise ValueError("SVDD distances must be a non-empty 1D tensor.")
-    finite = torch.isfinite(d)
-    if not bool(finite.any().item()):
-        raise FloatingPointError("All SVDD client distances are non-finite.")
 
-    finite_d = d[finite]
-    med_d = torch.median(finite_d)
-    mad_d = 1.4826 * torch.median((finite_d - med_d).abs())
-    mad_d = torch.clamp(mad_d, min=1e-6)
-    legacy_rounds = getattr(config, "svdd_warmup_rounds", None)
-    anneal_rounds = max(
-        1,
-        int(
-            legacy_rounds
-            if legacy_rounds is not None
-            else getattr(config, "tau_anneal_rounds", 100)
-        ),
-    )
-    # Phase-2 round 1 uses tau_start exactly; its final scheduled round uses
-    # tau_end exactly.  This makes the parameter name and search range literal.
-    denominator = max(1, anneal_rounds - 1)
-    p_tau = min(1.0, max(0.0, (svdd_round - 1) / float(denominator)))
-    if config.tau_start > 0.0 and config.tau_end > 0.0:
-        if not math.isfinite(float(config.tau_start)) or not math.isfinite(
-            float(config.tau_end)
-        ):
-            raise ValueError("tau_start and tau_end must be finite.")
-        if float(config.tau_end) > float(config.tau_start):
-            raise ValueError("tau_end must be less than or equal to tau_start.")
-        tau = config.tau_start - p_tau * (config.tau_start - config.tau_end)
-    else:
-        tau = config.tau_multiplier
-    threshold = med_d + tau * mad_d
-
-    keep_mask = finite & (d <= threshold)
-    max_keep_ratio = float(getattr(config, "svdd_max_keep_ratio", 1.0))
-    if not 0.0 < max_keep_ratio <= 1.0:
-        raise ValueError("svdd_max_keep_ratio must be in (0, 1].")
-    max_keep = max(1, min(d.numel(), int(round(max_keep_ratio * d.numel()))))
-    if int(keep_mask.sum().item()) > max_keep:
-        ranked = torch.where(finite, d, torch.full_like(d, float("inf")))
-        idx_keep = torch.topk(ranked, k=max_keep, largest=False).indices
-        keep_mask = torch.zeros_like(finite)
-        keep_mask[idx_keep] = True
-
-    if not bool(keep_mask.any().item()):
-        ranked = torch.where(finite, d, torch.full_like(d, float("inf")))
-        keep_mask[torch.argmin(ranked)] = True
-
-    return keep_mask.float(), float(tau), float(threshold.item())
+class SVDDObjective:
+    def __call__(self, embedding: Tensor, center: Tensor) -> Tensor:
+        return ((embedding - center) ** 2).sum(dim=1)
 
 
 def _lower_quantile_mask(
@@ -108,6 +53,8 @@ class SVDDDefense(BaseDefense):
     """Two-phase AE-SVDD defense server."""
 
     defense_name = "svdd"
+    # This is an internal protocol grid, not a user-facing hyperparameter.
+    TOPK_REJECT_RATIOS = (0.10, 0.20, 0.30, 0.40, 0.50)
 
     def __init__(
         self,
@@ -115,9 +62,12 @@ class SVDDDefense(BaseDefense):
         d_bn: int,
         device: torch.device,
         model_fn: Callable[[], nn.Module],
+        validation_loader: DataLoader | None = None,
         svdd_feature_extractor: Optional[Callable[[Dict[str, Tensor]], Tensor]] = None,
     ) -> None:
-        super().__init__(config, d_bn, device, model_fn)
+        super().__init__(config, d_bn, device, model_fn, validation_loader)
+        if not math.isfinite(float(config.alpha)) or not 0.0 <= float(config.alpha) <= 1.0:
+            raise ValueError("alpha must be finite and in [0, 1].")
         self._svdd_feat: Callable[[Dict[str, Tensor]], Tensor] = (
             svdd_feature_extractor or extract_bn_features
         )
@@ -156,10 +106,91 @@ class SVDDDefense(BaseDefense):
         self.optimizer_ae = torch.optim.Adam(
             self.ae.parameters(), lr=config.ae_lr, weight_decay=config.ae_weight_decay
         )
-        self.warmup_phase = WarmupPhase()
-        self.filtering_phase = FilteringPhase()
         self.reconstruction_objective = ReconstructionObjective()
         self.svdd_objective = SVDDObjective()
+
+    def _validation_accuracy(self) -> float:
+        if self.validation_loader is None:
+            return float("nan")
+        self.global_model.eval()
+        correct = 0
+        total = 0
+        with torch.inference_mode():
+            for inputs, targets in self.validation_loader:
+                inputs = inputs.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
+                logits = self.global_model(inputs)
+                correct += int((logits.argmax(dim=1) == targets).sum().item())
+                total += int(targets.numel())
+        return float(correct / max(1, total))
+
+    def _select_topk_by_validation(
+        self,
+        scores: Tensor,
+        client_state_dicts: List[Dict[str, Tensor]],
+    ) -> Tuple[Tensor, Tensor, float, float, Dict[str, float]]:
+        """Choose a Top-K mask by clean validation accuracy.
+
+        ``scores`` preserve the original phase-specific ranking: reconstruction
+        loss in Phase 1 and SVDD distance in Phase 2.  Only the cutoff changes.
+        """
+        if scores.ndim != 1 or scores.numel() != len(client_state_dicts):
+            raise ValueError("Top-K scores must match the client count.")
+        finite = torch.isfinite(scores)
+        if not bool(finite.any().item()):
+            raise FloatingPointError("All client scores are non-finite.")
+        ranked = torch.where(finite, scores, torch.full_like(scores, float("inf")))
+        order = torch.argsort(ranked, stable=True)
+        if self.validation_loader is None:
+            # Direct unit-level defense tests may omit data. Production runs
+            # always provide the fixed clean server validation loader.
+            reject_ratio = 0.20
+            keep_count = max(1, int(round((1.0 - reject_ratio) * len(client_state_dicts))))
+            indices = order[:keep_count].detach().cpu()
+            mask = torch.zeros(len(client_state_dicts), dtype=torch.bool)
+            mask[indices] = True
+            weights = mask.float() / float(keep_count)
+            selected_state = weighted_fedavg(
+                client_state_dicts, weights, device=self.aggregation_device
+            )
+            self.global_model.load_state_dict(selected_state)
+            return mask.float(), weights, reject_ratio, float("nan"), {}
+        candidate_accuracies: Dict[str, float] = {}
+        best_mask: Tensor | None = None
+        best_weights: Tensor | None = None
+        best_ratio = self.TOPK_REJECT_RATIOS[0]
+        best_accuracy = float("-inf")
+        for reject_ratio in self.TOPK_REJECT_RATIOS:
+            keep_count = max(1, min(len(client_state_dicts), int(round(
+                (1.0 - reject_ratio) * len(client_state_dicts)
+            ))))
+            indices = order[:keep_count].detach().cpu()
+            mask = torch.zeros(len(client_state_dicts), dtype=torch.bool)
+            mask[indices] = True
+            weights = mask.float() / float(keep_count)
+            candidate_state = weighted_fedavg(
+                client_state_dicts,
+                weights,
+                device=self.aggregation_device,
+            )
+            self.global_model.load_state_dict(candidate_state)
+            accuracy = self._validation_accuracy()
+            candidate_accuracies[f"{reject_ratio:.2f}"] = accuracy
+            # Iterating ratios in ascending order makes ties keep more clients.
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+                best_ratio = reject_ratio
+                best_mask = mask
+                best_weights = weights
+        if best_mask is None or best_weights is None:
+            raise RuntimeError("Top-K validation selection produced no candidate.")
+        selected_state = weighted_fedavg(
+            client_state_dicts,
+            best_weights,
+            device=self.aggregation_device,
+        )
+        self.global_model.load_state_dict(selected_state)
+        return best_mask.float(), best_weights, best_ratio, best_accuracy, candidate_accuracies
 
     def _build_input_matrix(
         self, client_state_dicts: List[Dict[str, Tensor]]
@@ -243,51 +274,22 @@ class SVDDDefense(BaseDefense):
 
     def phase1_step(
         self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]
-    ) -> Tuple[float, float, float, Tensor, Tensor]:
+    ) -> Tuple[float, float, float, Tensor, Tensor, float, float, Dict[str, float]]:
         """Train the AE and select the trusted Phase-1 clients.
 
-        ``reconstruction`` trains on all finite rows before retaining the clients
-        with the smallest post-update reconstruction errors. ``feature_median``
-        retains the legacy median-distance rule for the documented ablation.
+        Train on all finite rows, rank clients by reconstruction error, and let
+        the clean server validation set choose the Top-K cutoff.
 
         Returns:
             center_norm, z_variance, ae_loss,
-            per-client reconstruction loss (all K, for monitoring), keep_mask (bool K)
+            per-client reconstruction loss, keep mask, selected reject ratio,
+            selected validation accuracy, candidate validation accuracies
         """
 
         raw_X = self._build_input_matrix(client_state_dicts)  # (K, D_feat)
         X, finite_rows = self._scale_input_matrix(raw_X)
-        K = int(X.shape[0])
-        ratio = float(getattr(self.config, "ae_warmup_keep_ratio", 0.8))
-        ratio = min(max(ratio, 1e-6), 1.0)
-        num_finite = int(finite_rows.sum().item())
-        num_keep = max(1, min(num_finite, int(round(ratio * K))))
-
-        selection = str(
-            getattr(self.config, "phase1_selection", "reconstruction")
-        ).lower().strip()
-        if selection not in {"reconstruction", "feature_median"}:
-            raise ValueError(
-                "phase1_selection must be 'reconstruction' or "
-                f"'feature_median', got {selection!r}."
-            )
-
         finite_indices = torch.where(finite_rows)[0]
-        idx_keep: Tensor | None = None
-        if selection == "feature_median":
-            reference = X[finite_rows].median(dim=0).values
-            selector_scores = torch.norm(X - reference.unsqueeze(0), dim=1)
-            selector_scores = torch.where(
-                finite_rows,
-                selector_scores,
-                torch.full_like(selector_scores, float("inf")),
-            )
-            idx_keep = torch.topk(
-                selector_scores, k=num_keep, largest=False
-            ).indices.sort().values
-            X_train = X[idx_keep].to(self.device)
-        else:
-            X_train = X[finite_indices].to(self.device)
+        X_train = X[finite_indices].to(self.device)
 
         self.ae.train()
         x_hat = self.ae(X_train)
@@ -307,23 +309,9 @@ class SVDDDefense(BaseDefense):
                 per_client_loss,
                 torch.full_like(per_client_loss, float("inf")),
             )
-        if selection == "reconstruction":
-            idx_keep = torch.topk(
-                per_client_loss, k=num_keep, largest=False
-            ).indices.detach().cpu().sort().values
-        assert idx_keep is not None
-
-        keep_mask = torch.zeros(K, dtype=torch.bool)
-        keep_mask[idx_keep] = True
-
-        selected_sds = [client_state_dicts[int(i)] for i in idx_keep.tolist()]
-        alpha_sel = torch.full((num_keep,), 1.0 / float(num_keep))
-        global_sd = weighted_fedavg(
-            selected_sds,
-            alpha_sel,
-            device=self.aggregation_device,
+        keep_mask, weights, selected_ratio, validation_accuracy, candidates = (
+            self._select_topk_by_validation(per_client_loss.detach().cpu(), client_state_dicts)
         )
-        self.global_model.load_state_dict(global_sd)
 
         with torch.no_grad():
             self.ae.eval()
@@ -337,6 +325,9 @@ class SVDDDefense(BaseDefense):
             float(loss.item()),
             per_client_loss.detach().cpu(),
             keep_mask.detach().cpu(),
+            float(selected_ratio),
+            float(validation_accuracy),
+            candidates,
         )
     
     def init_center(self, client_state_dicts: List[Dict[str, Tensor]]) -> Tuple[float, float]:
@@ -371,13 +362,26 @@ class SVDDDefense(BaseDefense):
         return center_norm, z_var
 
     def phase2_step(
-        self, svdd_round: int, client_state_dicts: List[Dict[str, Tensor]]
-    ) -> Tuple[float, float, float, float, float, float, Tensor, Tensor, Tensor, Tensor]:
+        self, client_state_dicts: List[Dict[str, Tensor]]
+    ) -> Tuple[
+        float,
+        float,
+        float,
+        float,
+        Tensor,
+        Tensor,
+        Tensor,
+        Tensor,
+        float,
+        float,
+        Dict[str, float],
+    ]:
         """Run one SVDD-filtered aggregation round.
 
         Returns:
             center_norm, z_variance, svdd_loss_value, recon_loss_value,
-            tau, threshold, d, M, alpha, per-client reconstruction loss
+            d, M, alpha, per-client reconstruction loss, selected reject ratio,
+            validation accuracy, candidate validation accuracies
         """
 
         assert self.c is not None, "SVDD center c must be initialized before Phase 2."
@@ -408,9 +412,9 @@ class SVDDDefense(BaseDefense):
             d,
             torch.full_like(d, float("inf")),
         )
-        M, tau, threshold = _compute_svdd_keep_mask(d, svdd_round, self.config)
-
-        alpha = M / (M.sum() + 1e-12)
+        M, alpha, selected_ratio, validation_accuracy, candidates = (
+            self._select_topk_by_validation(d.detach().cpu(), client_state_dicts)
+        )
 
         trusted = M > 0.5
         if trusted.sum() > 0:
@@ -447,10 +451,7 @@ class SVDDDefense(BaseDefense):
         )
         recon_loss = recon_per_sample[keep].mean()
 
-        total_loss = (
-            self.config.svdd_loss_weight * svdd_loss
-            + self.config.recon_loss_weight * recon_loss
-        )
+        total_loss = self.config.alpha * svdd_loss + (1.0 - self.config.alpha) * recon_loss
 
         self._safe_ae_step(total_loss, self.config.svdd_grad_clip)
 
@@ -471,12 +472,120 @@ class SVDDDefense(BaseDefense):
             z_var,
             float(svdd_loss.item()),
             float(recon_loss.item()),
-            tau,
-            threshold,
             d.detach().cpu(),
             M.detach().cpu(),
             alpha.detach().cpu(),
             recon_per_client,
+            float(selected_ratio),
+            float(validation_accuracy),
+            candidates,
+        )
+
+    def _phase1_result(
+        self,
+        round_idx: int,
+        client_state_dicts: List[Dict[str, Tensor]],
+    ) -> RoundStats:
+        (
+            center_norm,
+            z_var,
+            ae_loss,
+            scores,
+            keep_mask,
+            selected_ratio,
+            validation_accuracy,
+            candidates,
+        ) = self.phase1_step(round_idx, client_state_dicts)
+        weights = keep_mask / (keep_mask.sum() + 1e-12)
+        kept = int(keep_mask.sum().item())
+        total = len(client_state_dicts)
+        return RoundStats(
+            center_norm=center_norm,
+            z_var=z_var,
+            ae_loss=ae_loss,
+            svdd_loss=float("nan"),
+            d=scores,
+            m=keep_mask,
+            alpha=weights,
+            phase="warmup",
+            show_detection=True,
+            monitor_items=[
+                ("Defense", "SVDD"),
+                ("Feature Mode", str(self.config.svdd_feature_mode)),
+                ("Kept clients", f"{kept}/{total}"),
+                ("Selected reject ratio", f"{selected_ratio:.2f}"),
+                ("Validation accuracy", f"{validation_accuracy:.6f}"),
+                ("Center L2-Norm", f"{center_norm:.6f}"),
+                ("Z-Space Variance", f"{z_var:.6f}"),
+                ("AE L1-Loss", f"{ae_loss:.6f}"),
+            ],
+            recon_loss=ae_loss,
+            total_loss=ae_loss,
+            server_metrics={
+                "selected_reject_ratio": selected_ratio,
+                "validation_accuracy": validation_accuracy,
+                "validation_candidates": candidates,
+            },
+            participant_metrics={"reconstruction_loss": scores.detach().cpu()},
+        )
+
+    def _phase2_result(
+        self,
+        client_state_dicts: List[Dict[str, Tensor]],
+    ) -> RoundStats:
+        if self.c is None:
+            self.init_center(client_state_dicts)
+        (
+            center_norm,
+            z_var,
+            svdd_loss,
+            recon_loss,
+            scores,
+            accepted,
+            weights,
+            recon_per_client,
+            selected_ratio,
+            validation_accuracy,
+            candidates,
+        ) = self.phase2_step(client_state_dicts)
+        kept = int(accepted.sum().item())
+        total = len(client_state_dicts)
+        total_loss = self.config.alpha * svdd_loss + (1.0 - self.config.alpha) * recon_loss
+        total_per_client = (
+            self.config.alpha * scores
+            + (1.0 - self.config.alpha) * recon_per_client
+        )
+        return RoundStats(
+            center_norm=center_norm,
+            z_var=z_var,
+            ae_loss=float("nan"),
+            svdd_loss=svdd_loss,
+            recon_loss=recon_loss,
+            total_loss=total_loss,
+            d=scores,
+            m=accepted,
+            alpha=weights,
+            phase="filtering",
+            show_detection=True,
+            monitor_items=[
+                ("Defense", "SVDD"),
+                ("Feature Mode", str(self.config.svdd_feature_mode)),
+                ("Kept clients", f"{kept}/{total}"),
+                ("Selected reject ratio", f"{selected_ratio:.2f}"),
+                ("Validation accuracy", f"{validation_accuracy:.6f}"),
+                ("Center L2-Norm", f"{center_norm:.6f}"),
+                ("Z-Space Variance", f"{z_var:.6f}"),
+            ],
+            server_metrics={
+                "selected_reject_ratio": selected_ratio,
+                "validation_accuracy": validation_accuracy,
+                "validation_candidates": candidates,
+            },
+            participant_metrics={
+                "svdd_loss": scores.detach().cpu(),
+                "reconstruction_loss": recon_per_client.detach().cpu(),
+                "total_loss": total_per_client.detach().cpu(),
+            },
         )
 
     def _aggregate(
@@ -485,8 +594,8 @@ class SVDDDefense(BaseDefense):
         client_state_dicts: List[Dict[str, Tensor]],
     ) -> RoundStats:
         if round_idx <= int(self.config.phase1_rounds):
-            return self.warmup_phase.run(self, round_idx, client_state_dicts)
-        return self.filtering_phase.run(self, round_idx, client_state_dicts)
+            return self._phase1_result(round_idx, client_state_dicts)
+        return self._phase2_result(client_state_dicts)
 
 
-__all__ = ["SVDDDefense", "_compute_svdd_keep_mask", "_lower_quantile_mask"]
+__all__ = ["SVDDDefense", "_lower_quantile_mask"]

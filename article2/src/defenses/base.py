@@ -5,6 +5,7 @@ from typing import Any, Callable, Dict, List, Protocol, Tuple
 
 import torch
 from torch import Tensor, nn
+from torch.utils.data import DataLoader
 
 from ..config import FedConfig
 
@@ -75,10 +76,12 @@ class BaseDefense:
         d_bn: int,
         device: torch.device,
         model_fn: Callable[[], nn.Module],
+        validation_loader: DataLoader | None = None,
     ) -> None:
         self.config = config
         self.device = device
         self.d_bn = d_bn
+        self.validation_loader = validation_loader
         self.global_model = model_fn().to(self.device)
         self.param_names: List[str] = [
             name for name, _parameter in self.global_model.named_parameters()

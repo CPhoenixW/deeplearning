@@ -65,7 +65,7 @@ def _phase_summary(path: Path, phases: tuple[str, ...]) -> dict[str, dict[str, f
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path("log/sf_weight_tau_sweep_single_20260806"))
+    parser.add_argument("--root", type=Path, default=Path("log/alpha_topk_sweep"))
     parser.add_argument("--last-n", type=int, default=10)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
@@ -99,9 +99,8 @@ def main() -> int:
         count = sum(row["candidate"] == candidate for row in rows)
         lines.append(
             f"| {candidate} | {count}/{len(DEFAULT_ATTACKS)} | "
-            f"recon:svdd={parameters['recon_loss_weight']:.0f}:{parameters['svdd_loss_weight']:.0f}, "
-            f"tau={parameters['tau_start']:.0f}->{parameters['tau_end']:.0f}, "
-            f"anneal={parameters['tau_anneal_rounds']} |"
+            f"alpha={parameters['alpha']:.2f}, phase1_rounds=15, "
+            "Top-K reject ratio由50组验证集逐轮选择 |"
         )
 
     lines += [

@@ -215,6 +215,7 @@ def _create_defense(context: PipelineContext):
         "model_fn": model_fn,
     }
     if context.defense_name == "svdd":
+        kwargs["validation_loader"] = context.validation_loader
         kwargs["svdd_feature_extractor"] = lambda state: (
             context.task.extract_svdd_features(context.config, state)
         )

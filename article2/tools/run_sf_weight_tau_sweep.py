@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch c002-based AE-SVDD reconstruction-weight/tau configurations.
+"""Launch c002-based AE-SVDD alpha configurations with validation Top-K.
 
 Each active variant is assigned to one GPU.  A variant worker runs all requested
 seeds sequentially on its GPU, and each pipeline JSON contains the complete
@@ -19,53 +19,15 @@ from typing import Any, Mapping, Sequence
 
 
 VARIANTS: dict[str, dict[str, Any]] = {
-    # The ratio in the names is recon_loss_weight:svdd_loss_weight.
-    "recon2_tau32": {
-        "svdd_loss_weight": 1.0,
-        "recon_loss_weight": 2.0,
-        "tau_start": 3.0,
-        "tau_end": 2.0,
-        "tau_anneal_rounds": 100,
-    },
-    "recon4_tau32": {
-        "svdd_loss_weight": 1.0,
-        "recon_loss_weight": 4.0,
-        "tau_start": 3.0,
-        "tau_end": 2.0,
-        "tau_anneal_rounds": 100,
-    },
-    "recon2_tau21": {
-        "svdd_loss_weight": 1.0,
-        "recon_loss_weight": 2.0,
-        "tau_start": 2.0,
-        "tau_end": 1.0,
-        "tau_anneal_rounds": 150,
-    },
-    "recon4_tau21": {
-        "svdd_loss_weight": 1.0,
-        "recon_loss_weight": 4.0,
-        "tau_start": 2.0,
-        "tau_end": 1.0,
-        "tau_anneal_rounds": 150,
-    },
-    "recon2_tau31": {
-        "svdd_loss_weight": 1.0,
-        "recon_loss_weight": 2.0,
-        "tau_start": 3.0,
-        "tau_end": 1.0,
-        "tau_anneal_rounds": 200,
-    },
-    "recon4_tau31": {
-        "svdd_loss_weight": 1.0,
-        "recon_loss_weight": 4.0,
-        "tau_start": 3.0,
-        "tau_end": 1.0,
-        "tau_anneal_rounds": 200,
-    },
+    "alpha02": {"alpha": 0.2},
+    "alpha033": {"alpha": 1.0 / 3.0},
+    "alpha05": {"alpha": 0.5},
+    "alpha075": {"alpha": 0.75},
+    "alpha1": {"alpha": 1.0},
 }
 
 DEFAULT_ATTACKS = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
-DEFAULT_SEEDS = (42, 43, 44)
+DEFAULT_SEEDS = (42,)
 
 # c002's effective configuration, including the stage-B population and
 # runtime settings.  Variant-specific values are overlaid below.
@@ -102,17 +64,12 @@ C002_OVERRIDES: dict[str, Any] = {
     "param_descriptor_statistics_ratio": 0.125,
     "param_descriptor_device": "cuda",
     "phase1_rounds": 15,
-    "phase1_selection": "reconstruction",
-    "ae_warmup_keep_ratio": 0.8,
-    "tau_anneal_rounds": 100,
     "center_ema_decay": 0.9,
-    "tau_multiplier": 3.0,
     "svdd_grad_clip": 1.0,
+    "alpha": 0.5,
     "center_init_quantile": 0.5,
     "phase2_recon_quantile": 0.8,
-    "svdd_max_keep_ratio": 1.0,
     "svdd_feature_clip": 10.0,
-    "svdd_warmup_rounds": None,
     "device": "cuda",
 }
 
@@ -345,7 +302,7 @@ def main() -> int:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("log/sf_weight_tau_sweep"),
+        default=Path("log/alpha_topk_sweep"),
         help="Output root for configs, logs, and result JSON files.",
     )
     parser.add_argument("--gpus", default="0,1,2", help="Three GPU ids in variant order.")
@@ -382,8 +339,8 @@ def main() -> int:
     gpus = _parse_csv(args.gpus, cast=int)
     seeds = _parse_csv(args.seeds, cast=int)
     attacks = _parse_csv(args.attacks, cast=str)
-    if args.variant == "all" and len(gpus) < 3:
-        parser.error("--gpus must provide at least three GPU ids when --variant=all")
+    if args.variant == "all" and not gpus:
+        parser.error("--gpus must provide at least one GPU id when --variant=all")
     if args.variant != "all" and not gpus:
         parser.error("--gpus must provide at least one GPU id")
     unknown = [attack for attack in attacks if attack not in DEFAULT_ATTACKS]

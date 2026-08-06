@@ -18,10 +18,13 @@ class PipelineContext:
     output_dir: Path
     config_files: Dict[str, str]
     applied_hyperparameters: Dict[str, object] = field(default_factory=dict)
-    prepared_dataloaders: Optional[Tuple[List[DataLoader], DataLoader]] = None
+    prepared_dataloaders: Optional[
+        Tuple[List[DataLoader], DataLoader, DataLoader]
+    ] = None
     task: Any = None
     device: Any = None
     client_loaders: List[DataLoader] = field(default_factory=list)
+    validation_loader: Optional[DataLoader] = None
     test_loader: Optional[DataLoader] = None
     clients: List[Any] = field(default_factory=list)
     ground_truth: Any = None

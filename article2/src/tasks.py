@@ -25,6 +25,10 @@ except ImportError:
     from models import ag_news_classifier, fashion_mnist_cnn, lenet_grayscale, resnet18_cifar10
 
 
+SERVER_VALIDATION_GROUPS = 50
+SERVER_VALIDATION_GROUP_SIZE = 64
+
+
 def _resolve_cifar10_root(config: FedConfig) -> str:
     """Root directory passed to torchvision CIFAR10.
 
@@ -58,8 +62,10 @@ class FederatedTask(ABC):
         """Global model architecture for this task."""
 
     @abstractmethod
-    def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
-        """One train loader per client + one test loader (IID or Dirichlet label skew)."""
+    def build_dataloaders(
+        self, config: FedConfig
+    ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
+        """Client loaders, fixed clean validation loader, and test loader."""
 
     def extract_svdd_features(self, config: FedConfig, state_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Flattened vector for SVDD / AE (default: BatchNorm buffers + γ/β)."""
@@ -82,7 +88,9 @@ class Cifar10Task(FederatedTask):
     def build_model(self) -> torch.nn.Module:
         return resnet18_cifar10(num_classes=self.num_classes)
 
-    def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
+    def build_dataloaders(
+        self, config: FedConfig
+    ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
         transform_train = transforms.Compose(
             [
                 transforms.RandomCrop(32, padding=4),
@@ -96,10 +104,15 @@ class Cifar10Task(FederatedTask):
         train_dataset: Dataset = datasets.CIFAR10(
             root=root, train=True, download=True, transform=transform_train
         )
+        validation_dataset: Dataset = datasets.CIFAR10(
+            root=root, train=True, download=True, transform=transform_test
+        )
         test_dataset: Dataset = datasets.CIFAR10(
             root=root, train=False, download=True, transform=transform_test
         )
-        return _split_train_test_loaders(config, train_dataset, test_dataset, self.num_classes)
+        return _split_train_test_loaders(
+            config, train_dataset, validation_dataset, test_dataset, self.num_classes
+        )
 
 
 class FashionMnistTask(FederatedTask):
@@ -112,7 +125,9 @@ class FashionMnistTask(FederatedTask):
     def build_model(self) -> torch.nn.Module:
         return fashion_mnist_cnn(num_classes=self.num_classes)
 
-    def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
+    def build_dataloaders(
+        self, config: FedConfig
+    ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
         transform_train = transforms.Compose(
             [
                 transforms.RandomCrop(28, padding=2),
@@ -132,10 +147,15 @@ class FashionMnistTask(FederatedTask):
         train_dataset: Dataset = datasets.FashionMNIST(
             root=root, train=True, download=True, transform=transform_train
         )
+        validation_dataset: Dataset = datasets.FashionMNIST(
+            root=root, train=True, download=True, transform=transform_test
+        )
         test_dataset: Dataset = datasets.FashionMNIST(
             root=root, train=False, download=True, transform=transform_test
         )
-        return _split_train_test_loaders(config, train_dataset, test_dataset, self.num_classes)
+        return _split_train_test_loaders(
+            config, train_dataset, validation_dataset, test_dataset, self.num_classes
+        )
 
 
 class MnistTask(FederatedTask):
@@ -148,7 +168,9 @@ class MnistTask(FederatedTask):
     def build_model(self) -> torch.nn.Module:
         return lenet_grayscale(num_classes=self.num_classes)
 
-    def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
+    def build_dataloaders(
+        self, config: FedConfig
+    ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
         transform_train = transforms.Compose([
             transforms.RandomCrop(28, padding=2),
             transforms.ToTensor(),
@@ -160,8 +182,11 @@ class MnistTask(FederatedTask):
         ])
         root = self.data_subdir(config)
         train_dataset: Dataset = datasets.MNIST(root=root, train=True, download=True, transform=transform_train)
+        validation_dataset: Dataset = datasets.MNIST(root=root, train=True, download=True, transform=transform_test)
         test_dataset: Dataset = datasets.MNIST(root=root, train=False, download=True, transform=transform_test)
-        return _split_train_test_loaders(config, train_dataset, test_dataset, self.num_classes)
+        return _split_train_test_loaders(
+            config, train_dataset, validation_dataset, test_dataset, self.num_classes
+        )
 
 
 class _TokenizedTextDataset(Dataset):
@@ -275,7 +300,9 @@ class AGNewsTask(FederatedTask):
             dropout=0.1,
         )
 
-    def build_dataloaders(self, config: FedConfig) -> Tuple[List[DataLoader], DataLoader]:
+    def build_dataloaders(
+        self, config: FedConfig
+    ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
         if load_dataset is None:
             detail = (
                 f" Root cause: {_HF_DATASETS_IMPORT_ERROR!r}"
@@ -322,7 +349,9 @@ class AGNewsTask(FederatedTask):
             token_to_id=token_to_id,
             seq_len=self.seq_len,
         )
-        return _split_train_test_loaders(config, train_dataset, test_dataset, self.num_classes)
+        return _split_train_test_loaders(
+            config, train_dataset, train_dataset, test_dataset, self.num_classes
+        )
 
     def extract_svdd_features(self, config: FedConfig, state_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Use Transformer LayerNorm (and optionally BN head) for SVDD — richer than BN-only."""
@@ -434,23 +463,48 @@ def _client_index_lists_dirichlet_strict(
 def _split_train_test_loaders(
     config: FedConfig,
     train_dataset: Dataset,
+    validation_dataset: Dataset,
     test_dataset: Dataset,
     num_classes: int,
-) -> Tuple[List[DataLoader], DataLoader]:
+) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
+    labels = _dataset_train_labels(train_dataset)
+    validation_indices = _validation_indices(
+        labels,
+        num_classes=num_classes,
+        seed=int(config.seed),
+        groups=SERVER_VALIDATION_GROUPS,
+        group_size=SERVER_VALIDATION_GROUP_SIZE,
+    )
+    validation_set = Subset(validation_dataset, validation_indices)
+    validation_loader = DataLoader(
+        validation_set,
+        batch_size=SERVER_VALIDATION_GROUP_SIZE,
+        shuffle=False,
+        num_workers=int(getattr(config, "num_workers", 0)),
+        pin_memory=(config.device in ("cuda", "auto")),
+    )
+    validation_lookup = set(validation_indices)
+    available_indices = [
+        index for index in range(len(train_dataset)) if index not in validation_lookup
+    ]
+    available_labels = labels[available_indices]
     num_clients = config.num_clients
     alpha = config.dirichlet_alpha
     if alpha is None and config.dirichlet_noniid_beta is not None:
         alpha = config.dirichlet_noniid_beta
 
     if alpha is None:
-        client_index_lists = _client_index_lists_iid(
-            len(train_dataset), num_clients, config.seed
+        relative_lists = _client_index_lists_iid(
+            len(available_indices), num_clients, config.seed
         )
     else:
-        labels = _dataset_train_labels(train_dataset)
-        client_index_lists = _client_index_lists_dirichlet_strict(
-            labels, num_clients, num_classes, float(alpha), config.seed
+        relative_lists = _client_index_lists_dirichlet_strict(
+            available_labels, num_clients, num_classes, float(alpha), config.seed
         )
+    client_index_lists = [
+        [available_indices[index] for index in indices]
+        for indices in relative_lists
+    ]
 
     client_loaders: List[DataLoader] = []
     for indices in client_index_lists:
@@ -471,7 +525,35 @@ def _split_train_test_loaders(
         num_workers=int(getattr(config, "num_workers", 0)),
         pin_memory=(config.device in ("cuda", "auto")),
     )
-    return client_loaders, test_loader
+    return client_loaders, validation_loader, test_loader
+
+
+def _validation_indices(
+    labels: torch.Tensor,
+    *,
+    num_classes: int,
+    seed: int,
+    groups: int,
+    group_size: int,
+) -> List[int]:
+    """Select a deterministic, class-balanced clean server validation set."""
+
+    total = min(int(labels.numel()), int(groups) * int(group_size))
+    if total < 1:
+        raise ValueError("The server validation set cannot be empty.")
+    generator = torch.Generator().manual_seed(int(seed) + 104729)
+    base = total // int(num_classes)
+    remainder = total % int(num_classes)
+    selected: list[int] = []
+    for cls in range(int(num_classes)):
+        available = torch.where(labels == cls)[0]
+        count = base + (1 if cls < remainder else 0)
+        if count > int(available.numel()):
+            raise ValueError(f"Not enough class-{cls} samples for server validation.")
+        order = torch.randperm(int(available.numel()), generator=generator)[:count]
+        selected.extend(int(item) for item in available[order].tolist())
+    shuffle = torch.randperm(len(selected), generator=generator).tolist()
+    return [selected[index] for index in shuffle]
 
 
 TASK_REGISTRY: Dict[str, Type[FederatedTask]] = {

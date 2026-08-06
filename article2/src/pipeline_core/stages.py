@@ -39,12 +39,14 @@ class DataStage:
         if prepared is None:
             prepared = self.build(context.config)
             context.prepared_dataloaders = prepared
-        context.client_loaders, context.test_loader = prepared
+        context.client_loaders, context.validation_loader, context.test_loader = prepared
         if len(context.client_loaders) != context.config.num_clients:
             raise ValueError(
                 "Prepared dataloader count does not match config.num_clients: "
                 f"{len(context.client_loaders)} != {context.config.num_clients}"
             )
+        if context.validation_loader is None:
+            raise ValueError("A clean server validation loader is required.")
         return context
 
 
