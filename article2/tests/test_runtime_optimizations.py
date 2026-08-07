@@ -73,6 +73,21 @@ def test_aggregation_device_keeps_results_equivalent_on_cpu() -> None:
     assert torch.equal(trimmed["weight"], states[1]["weight"])
 
 
+def test_weighted_fedavg_drops_nonfinite_rejected_updates() -> None:
+    states = [_tiny_state(1.0), _tiny_state(float("nan")), _tiny_state(3.0)]
+
+    # A zero-weight NaN must not poison the sum (0 * NaN is NaN in PyTorch).
+    rejected = weighted_fedavg(states, torch.tensor([1.0, 0.0, 0.0]))
+    assert torch.equal(rejected["weight"], states[0]["weight"])
+
+    # If an invalid update is accidentally active, discard it and renormalize
+    # the finite weights instead of returning a non-finite global model.
+    recovered = weighted_fedavg(states, torch.tensor([0.25, 0.25, 0.5]))
+    expected = (0.25 * states[0]["weight"] + 0.5 * states[2]["weight"]) / 0.75
+    assert torch.allclose(recovered["weight"], expected)
+    assert torch.isfinite(recovered["weight"]).all()
+
+
 def test_multi_krum_scores_support_explicit_device() -> None:
     states = [_tiny_state(float(i)) for i in range(5)]
     implicit = compute_multi_krum_scores(states, num_byzantine=1)

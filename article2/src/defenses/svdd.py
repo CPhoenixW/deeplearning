@@ -141,12 +141,24 @@ class SVDDDefense(BaseDefense):
             raise FloatingPointError("All client scores are non-finite.")
         ranked = torch.where(finite, scores, torch.full_like(scores, float("inf")))
         order = torch.argsort(ranked, stable=True)
+        # Non-finite feature/score rows are never eligible for Top-K, even
+        # when the requested rejection ratio would otherwise keep more than
+        # the finite population.  This prevents invalid uploads from being
+        # assigned positive aggregation weight and makes the effective filter
+        # stricter than the nominal 50% cap when necessary.
+        finite_order = order[finite[order]]
         if self.validation_loader is None:
             # Direct unit-level defense tests may omit data. Production runs
             # always provide the fixed clean server validation loader.
             reject_ratio = 0.20
-            keep_count = max(1, int(round((1.0 - reject_ratio) * len(client_state_dicts))))
-            indices = order[:keep_count].detach().cpu()
+            keep_count = max(
+                1,
+                min(
+                    int(finite_order.numel()),
+                    int(round((1.0 - reject_ratio) * len(client_state_dicts))),
+                ),
+            )
+            indices = finite_order[:keep_count].detach().cpu()
             mask = torch.zeros(len(client_state_dicts), dtype=torch.bool)
             mask[indices] = True
             weights = mask.float() / float(keep_count)
@@ -161,10 +173,14 @@ class SVDDDefense(BaseDefense):
         best_ratio = self.TOPK_REJECT_RATIOS[0]
         best_accuracy = float("-inf")
         for reject_ratio in self.TOPK_REJECT_RATIOS:
-            keep_count = max(1, min(len(client_state_dicts), int(round(
-                (1.0 - reject_ratio) * len(client_state_dicts)
-            ))))
-            indices = order[:keep_count].detach().cpu()
+            keep_count = max(
+                1,
+                min(
+                    int(finite_order.numel()),
+                    int(round((1.0 - reject_ratio) * len(client_state_dicts))),
+                ),
+            )
+            indices = finite_order[:keep_count].detach().cpu()
             mask = torch.zeros(len(client_state_dicts), dtype=torch.bool)
             mask[indices] = True
             weights = mask.float() / float(keep_count)

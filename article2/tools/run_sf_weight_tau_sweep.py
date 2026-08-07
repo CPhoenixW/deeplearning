@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch c002-based AE-SVDD alpha configurations with validation Top-K.
+"""Launch C002-based AE-SVDD alpha configurations with validation Top-K.
 
 Each active variant is assigned to one GPU.  A variant worker runs all requested
 seeds sequentially on its GPU, and each pipeline JSON contains the complete
@@ -74,6 +74,14 @@ C002_OVERRIDES: dict[str, Any] = {
     "device": "cuda",
 }
 
+# C002 was calibrated on CIFAR-10.  Keep its defense/runtime settings while
+# restoring the task-model learning-rate calibration for other image tasks.
+TASK_CLIENT_OVERRIDES: dict[str, dict[str, Any]] = {
+    "fashion_mnist": {"client_lr": 0.1, "client_weight_decay": 0.0},
+    "mnist": {"client_lr": 0.1, "client_weight_decay": 0.0001},
+    "ag_news": {"client_lr": 0.1, "client_weight_decay": 0.0},
+}
+
 
 def _parse_csv(value: str, *, cast: type = str) -> tuple[Any, ...]:
     items = [item.strip() for item in value.split(",") if item.strip()]
@@ -84,6 +92,7 @@ def _parse_csv(value: str, *, cast: type = str) -> tuple[Any, ...]:
 
 def _json_config(
     *,
+    task: str,
     variant: str,
     seed: int,
     output_dir: Path,
@@ -91,10 +100,11 @@ def _json_config(
     rounds: int,
 ) -> dict[str, Any]:
     overrides = dict(C002_OVERRIDES)
+    overrides.update(TASK_CLIENT_OVERRIDES.get(task, {}))
     overrides.update(VARIANTS[variant])
     overrides.update({"seed": int(seed), "total_rounds": int(rounds)})
     return {
-        "task": "cifar10",
+        "task": task,
         "attacks": ",".join(attacks),
         "defenses": "svdd",
         "log_dir": str(output_dir),
@@ -107,6 +117,7 @@ def _json_config(
 def _write_configs(
     root: Path,
     *,
+    task: str,
     variant: str,
     seeds: Sequence[int],
     attacks: Sequence[str],
@@ -119,6 +130,7 @@ def _write_configs(
         output_dir = root / variant / f"seed_{seed}"
         config_path = config_root / f"seed_{seed}.json"
         payload = _json_config(
+            task=task,
             variant=variant,
             seed=seed,
             output_dir=output_dir,
@@ -136,6 +148,7 @@ def _write_configs(
 def _write_attack_configs(
     root: Path,
     *,
+    task: str,
     variant: str,
     seed: int,
     output_dir: Path,
@@ -148,6 +161,7 @@ def _write_attack_configs(
     for attack in attacks:
         path = config_root / f"{attack}.json"
         payload = _json_config(
+            task=task,
             variant=variant,
             seed=seed,
             output_dir=output_dir,
@@ -162,7 +176,13 @@ def _write_attack_configs(
     return paths
 
 
-def _attack_complete(path: Path, *, variant: str, rounds: int) -> bool:
+def _result_path(output_dir: Path, task: str, attack: str) -> Path:
+    return output_dir / f"{task}__{attack}__svdd.json"
+
+
+def _attack_complete(
+    path: Path, *, task: str, variant: str, rounds: int
+) -> bool:
     """Return whether one final result has the expected run contract."""
     if not path.exists():
         return False
@@ -177,17 +197,22 @@ def _attack_complete(path: Path, *, variant: str, rounds: int) -> bool:
     effective = meta.get("effective_config", {}) if isinstance(meta, dict) else {}
     if int(meta.get("total_rounds", -1)) != int(rounds):
         return False
+    if str(meta.get("task", "")) != str(task):
+        return False
     for key, value in VARIANTS[variant].items():
         if effective.get(key) != value:
             return False
     return True
 
 
-def _complete(output_dir: Path, attacks: Sequence[str], rounds: int) -> bool:
+def _complete(
+    output_dir: Path, task: str, attacks: Sequence[str], rounds: int
+) -> bool:
     variant = output_dir.parent.name
     return all(
         _attack_complete(
-            output_dir / f"cifar10__{attack}__svdd.json",
+            _result_path(output_dir, task, attack),
+            task=task,
             variant=variant,
             rounds=rounds,
         )
@@ -198,6 +223,7 @@ def _complete(output_dir: Path, attacks: Sequence[str], rounds: int) -> bool:
 def _run_variant(
     *,
     root: Path,
+    task: str,
     variant: str,
     gpu: int,
     seeds: Sequence[int],
@@ -212,18 +238,19 @@ def _run_variant(
     variant_root.mkdir(parents=True, exist_ok=True)
     with launcher_log.open("a", encoding="utf-8") as log:
         log.write(
-            f"variant={variant} gpu={gpu} seeds={list(seeds)} "
+            f"task={task} variant={variant} gpu={gpu} seeds={list(seeds)} "
             f"attacks={list(attacks)} rounds={rounds}\n"
         )
         for seed in seeds:
             output_dir = root / variant / f"seed_{seed}"
-            if not force and _complete(output_dir, attacks, rounds):
+            if not force and _complete(output_dir, task, attacks, rounds):
                 log.write(f"SKIP complete seed={seed}\n")
                 log.flush()
                 continue
             output_dir.mkdir(parents=True, exist_ok=True)
             config_paths = _write_attack_configs(
                 root,
+                task=task,
                 variant=variant,
                 seed=int(seed),
                 output_dir=output_dir,
@@ -245,7 +272,8 @@ def _run_variant(
                 for attack in attacks
                 if force
                 or not _attack_complete(
-                    output_dir / f"cifar10__{attack}__svdd.json",
+                    _result_path(output_dir, task, attack),
+                    task=task,
                     variant=variant,
                     rounds=rounds,
                 )
@@ -308,6 +336,11 @@ def main() -> int:
     )
     parser.add_argument("--gpus", default="0,1,2", help="Three GPU ids in variant order.")
     parser.add_argument("--seeds", default=",".join(map(str, DEFAULT_SEEDS)))
+    parser.add_argument(
+        "--task",
+        default="cifar10",
+        help="Task registry key (for example: cifar10 or fashion_mnist).",
+    )
     parser.add_argument("--attacks", default=",".join(DEFAULT_ATTACKS))
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument(
@@ -362,7 +395,7 @@ def main() -> int:
     for index, variant in enumerate(selected):
         gpu = int(gpus[index % len(gpus)])
         print(
-            f"{variant}: gpu={gpu} seeds={list(seeds)} attacks={list(attacks)} "
+            f"{variant}: task={args.task} gpu={gpu} seeds={list(seeds)} attacks={list(attacks)} "
             f"rounds={args.rounds} params={VARIANTS[variant]}"
         )
     if args.dry_run:
@@ -373,6 +406,7 @@ def main() -> int:
     if args.variant != "all":
         return _run_variant(
             root=root,
+            task=str(args.task),
             variant=args.variant,
             gpu=int(gpus[0]),
             seeds=seeds,
@@ -402,6 +436,8 @@ def main() -> int:
                 str(script_path),
                 "--variant",
                 variant,
+                "--task",
+                str(args.task),
                 "--gpus",
                 str(gpu),
                 "--seeds",

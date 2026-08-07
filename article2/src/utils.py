@@ -179,13 +179,36 @@ def robust_zscore(x: Tensor) -> Tensor:
     return (x - med) / m
 
 
+def _state_dict_is_finite(state_dict: Dict[str, Tensor]) -> bool:
+    """Return whether all floating-point state entries are finite.
+
+    Integer buffers (for example ``num_batches_tracked``) are finite by
+    construction and do not need a conversion to floating point here.
+    """
+
+    for value in state_dict.values():
+        if (torch.is_floating_point(value) or torch.is_complex(value)) and not bool(
+            torch.isfinite(value).all().item()
+        ):
+            return False
+    return True
+
+
 def weighted_fedavg(
     client_state_dicts: List[Dict[str, Tensor]],
     alpha: Tensor,
     *,
     device: torch.device | str | None = None,
 ) -> Dict[str, Tensor]:
-    """Weighted FedAvg aggregation over client state_dicts."""
+    """Weighted FedAvg aggregation over client state_dicts.
+
+    Zero-weight clients are omitted before stacking.  This matters for
+    filtering defenses: multiplying a rejected ``NaN``/``Inf`` update by zero
+    still produces ``NaN`` in PyTorch.  If an active client contains a
+    non-finite value, the client is removed and the remaining weights are
+    renormalized.  A round with no finite positively weighted client fails
+    explicitly instead of silently poisoning the global model.
+    """
 
     if len(client_state_dicts) == 0:
         raise ValueError("No client state_dicts provided.")
@@ -198,17 +221,70 @@ def weighted_fedavg(
         else client_state_dicts[0][next(iter(client_state_dicts[0]))].device
     )
     alpha = alpha.to(aggregation_device, non_blocking=True)
+    if (torch.is_floating_point(alpha) or torch.is_complex(alpha)) and not bool(
+        torch.isfinite(alpha).all().item()
+    ):
+        raise ValueError("alpha must contain only finite values.")
+    if bool((alpha < 0).any().item()):
+        raise ValueError("alpha must be non-negative.")
+
+    active = alpha > 0
+    if not bool(active.any().item()):
+        raise ValueError("alpha must assign positive weight to at least one client.")
+    active_indices = torch.where(active)[0].detach().cpu().tolist()
+    active_states = [client_state_dicts[int(i)] for i in active_indices]
+    active_alpha = alpha[active]
 
     keys = client_state_dicts[0].keys()
-    agg: Dict[str, Tensor] = {}
-    for k in keys:
-        stacked = torch.stack(
-            [sd[k].to(aggregation_device, non_blocking=True) for sd in client_state_dicts],
-            dim=0,
+
+    def _aggregate(
+        states: List[Dict[str, Tensor]], weights: Tensor
+    ) -> tuple[Dict[str, Tensor], bool]:
+        result: Dict[str, Tensor] = {}
+        finite_flags: List[Tensor] = []
+        for key in keys:
+            stacked = torch.stack(
+                [sd[key].to(aggregation_device, non_blocking=True) for sd in states],
+                dim=0,
+            )
+            # Reshape weights for broadcasting.  ``states`` contains only
+            # positively weighted clients, so zero * NaN cannot occur here.
+            w = weights.view(-1, *([1] * (stacked.ndim - 1)))
+            value = (w * stacked).sum(dim=0)
+            if torch.is_floating_point(value) or torch.is_complex(value):
+                # Defer the host synchronization until all state entries have
+                # been reduced; per-key ``.item()`` calls are costly on CUDA.
+                finite_flags.append(torch.isfinite(value).all())
+            result[key] = value
+        encountered_nonfinite = bool(
+            finite_flags and not bool(torch.stack(finite_flags).all().item())
         )
-        # reshape alpha for broadcasting
-        w = alpha.view(-1, *([1] * (stacked.ndim - 1)))
-        agg[k] = (w * stacked).sum(dim=0)
+        return result, encountered_nonfinite
+
+    agg, encountered_nonfinite = _aggregate(active_states, active_alpha)
+    if not encountered_nonfinite:
+        return agg
+
+    # A malicious update can be non-finite in only one parameter tensor.  Find
+    # and remove such clients once, then recompute every key with a common
+    # finite population so the resulting state remains internally consistent.
+    finite_mask = torch.tensor(
+        [_state_dict_is_finite(state) for state in active_states],
+        dtype=torch.bool,
+        device=active_alpha.device,
+    )
+    if not bool(finite_mask.any().item()):
+        raise FloatingPointError("No finite positively weighted client update is available.")
+    retained_states = [
+        state for state, keep in zip(active_states, finite_mask.detach().cpu().tolist()) if keep
+    ]
+    retained_alpha = active_alpha[finite_mask]
+    weight_sum = retained_alpha.sum()
+    if not bool(torch.isfinite(weight_sum).item()) or float(weight_sum.item()) <= 0.0:
+        raise FloatingPointError("Finite client weights cannot be normalized.")
+    agg, still_nonfinite = _aggregate(retained_states, retained_alpha / weight_sum)
+    if still_nonfinite:
+        raise FloatingPointError("Finite client aggregation produced a non-finite global state.")
     return agg
 
 
