@@ -176,8 +176,9 @@ class SVDDDefense(BaseDefense):
             self.global_model.load_state_dict(candidate_state)
             accuracy = self._validation_accuracy()
             candidate_accuracies[f"{reject_ratio:.2f}"] = accuracy
-            # Iterating ratios in ascending order makes ties keep more clients.
-            if accuracy > best_accuracy:
+            # Iterate from low to high so an equal-score update replaces the
+            # previous candidate and ties choose the largest rejection ratio.
+            if accuracy >= best_accuracy:
                 best_accuracy = accuracy
                 best_ratio = reject_ratio
                 best_mask = mask

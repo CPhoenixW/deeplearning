@@ -72,3 +72,38 @@ def test_both_phases_use_validation_topk_and_alpha() -> None:
         assert int(result.m.sum().item()) in {2, 3, 4}
     expected = phase2.svdd_loss * 0.25 + phase2.recon_loss * 0.75
     assert abs(phase2.total_loss - expected) < 1e-6
+
+
+def test_validation_ties_choose_largest_rejection_ratio() -> None:
+    """A flat validation score must favor the more defensive candidate."""
+
+    config = FedConfig(
+        num_clients=5,
+        num_benign=4,
+        latent_dim=4,
+        param_descriptor_dim=64,
+        param_descriptor_device="cpu",
+        svdd_feature_mode="fixed_projection",
+        device="cpu",
+    )
+    validation = DataLoader(
+        TensorDataset(torch.zeros(10, 4), torch.zeros(10, dtype=torch.long)),
+        batch_size=10,
+    )
+    server = SVDDDefense(
+        config,
+        d_bn=64,
+        device=torch.device("cpu"),
+        model_fn=_TinyModel,
+        validation_loader=validation,
+    )
+    reference = server.state_dict_for_clients()
+    clients = [copy.deepcopy(reference) for _ in range(config.num_clients)]
+    scores = torch.arange(config.num_clients, dtype=torch.float32)
+
+    _, _, selected_ratio, _, candidates = server._select_topk_by_validation(
+        scores, clients
+    )
+
+    assert set(candidates.values()) == {candidates["0.10"]}
+    assert selected_ratio == 0.5

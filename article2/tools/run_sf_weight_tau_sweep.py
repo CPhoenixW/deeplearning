@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 
 VARIANTS: dict[str, dict[str, Any]] = {
     "alpha02": {"alpha": 0.2},
+    "alpha025": {"alpha": 0.25},
     "alpha033": {"alpha": 1.0 / 3.0},
     "alpha05": {"alpha": 0.5},
     "alpha075": {"alpha": 0.75},
