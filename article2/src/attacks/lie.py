@@ -72,21 +72,33 @@ def rewrite_lie_uploads(
         )
 
     benign_states = client_states[:benign_count]
+    # Client states are kept on CPU between stages.  The per-layer LIE
+    # statistics are large enough to dominate the remaining confirmation run,
+    # so use the aggregation device when CUDA aggregation is enabled and move
+    # only the compact crafted result back to CPU.
+    compute_device = (
+        torch.device("cuda")
+        if bool(getattr(config, "cuda_aggregation", False))
+        and torch.cuda.is_available()
+        else torch.device("cpu")
+    )
     crafted_delta: Dict[str, Tensor] = {}
     for key, global_value in global_state.items():
         global_cpu = global_value.detach().cpu()
         if not global_cpu.is_floating_point():
             continue
+        global_work = global_cpu.float().to(compute_device)
         deltas = torch.stack(
             [
-                state[key].detach().cpu().float() - global_cpu.float()
+                state[key].detach().to(compute_device, non_blocking=True).float()
+                - global_work
                 for state in benign_states
             ],
             dim=0,
         )
         mean = deltas.mean(dim=0)
         std = deltas.std(dim=0, unbiased=False)
-        crafted_delta[key] = mean + z * std
+        crafted_delta[key] = (mean + z * std).detach().cpu()
 
     for client_id in client_ids:
         if not 0 <= client_id < len(client_states):
