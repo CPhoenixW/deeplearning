@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Run the JSON-driven main-comparison defense matrix on one or more GPUs.
+"""Run a JSON-driven defense comparison matrix on one or more GPUs.
 
-The experiment protocol defines FedAvg, Trimmed Mean, and Multi-Krum as the
-primary comparison methods.  This scheduler gives every task × attack ×
-defense combination its own JSON configuration and result directory, so jobs
-can run concurrently while remaining independently resumable.
+The default matrix remains FedAvg, Trimmed Mean, and Multi-Krum.  The same
+resumable scheduler can also run the modular defenses (AlignIns, BNGuard,
+FedDMC, LASA, and FL-Defender) so all methods use one consistent protocol.
 """
 
 from __future__ import annotations
@@ -21,6 +20,10 @@ from typing import Any, Sequence
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Canonical registry names accepted by this comparison scheduler.  Keep the
+# default CLI value below as the original three baselines, while allowing an
+# extended matrix to opt into the additional defenses without a second runner.
+SUPPORTED_DEFENSES = ("avg", "tm", "mk", "alignins", "bnguard", "dmc", "lasa", "fld")
 CORE_DEFENSES = ("avg", "tm", "mk")
 DEFAULT_ATTACKS = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
 
@@ -164,6 +167,12 @@ def main() -> int:
     parser.add_argument("--gpus", default="0,1,2")
     parser.add_argument("--workers-per-gpu", type=int, default=3)
     parser.add_argument(
+        "--omp-threads",
+        type=int,
+        default=4,
+        help="CPU threads exposed to each worker process (default: 4).",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=Path("log/fashion_mnist_core_baselines"),
@@ -176,14 +185,14 @@ def main() -> int:
     defenses = _parse_csv(args.defenses)
     attacks = _parse_csv(args.attacks)
     gpus = _parse_csv(args.gpus, cast=int)
-    unknown_defenses = sorted(set(defenses) - set(CORE_DEFENSES))
+    unknown_defenses = sorted(set(defenses) - set(SUPPORTED_DEFENSES))
     unknown_attacks = sorted(set(attacks) - set(DEFAULT_ATTACKS))
     if unknown_defenses:
-        parser.error(f"Only core comparison defenses are supported: {unknown_defenses}")
+        parser.error(f"Unsupported comparison defenses: {unknown_defenses}")
     if unknown_attacks:
         parser.error(f"Unsupported attack IDs: {unknown_attacks}")
-    if args.rounds < 1 or args.workers_per_gpu < 1:
-        parser.error("--rounds and --workers-per-gpu must be positive")
+    if args.rounds < 1 or args.workers_per_gpu < 1 or args.omp_threads < 1:
+        parser.error("--rounds, --workers-per-gpu, and --omp-threads must be positive")
 
     root = args.output_root.resolve()
     jobs = _build_jobs(
@@ -225,9 +234,9 @@ def main() -> int:
                 {
                     "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
                     "CUDA_VISIBLE_DEVICES": str(gpu),
-                    "OMP_NUM_THREADS": "4",
-                    "MKL_NUM_THREADS": "4",
-                    "OPENBLAS_NUM_THREADS": "4",
+                    "OMP_NUM_THREADS": str(int(args.omp_threads)),
+                    "MKL_NUM_THREADS": str(int(args.omp_threads)),
+                    "OPENBLAS_NUM_THREADS": str(int(args.omp_threads)),
                     "PYTHONUNBUFFERED": "1",
                 }
             )
