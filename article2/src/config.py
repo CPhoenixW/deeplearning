@@ -164,6 +164,10 @@ class FedConfig:
     # Single tunable loss-mixing coefficient.  alpha=1 is pure SVDD;
     # alpha=0 is pure reconstruction loss.
     alpha: float = 0.5
+    # Detection score used in both SVDD phases for sensitivity ablations.
+    # ``legacy`` preserves the original protocol (reconstruction in Phase 1,
+    # SVDD distance in Phase 2); the new study uses recon/combined/svdd.
+    svdd_score_mode: str = "legacy"
     # Trusted-sample quantiles used by center initialization and Phase-2
     # reconstruction training. Values must be in (0, 1].
     center_init_quantile: float = 0.5

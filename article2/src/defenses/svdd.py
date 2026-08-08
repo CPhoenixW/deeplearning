@@ -55,6 +55,7 @@ class SVDDDefense(BaseDefense):
     defense_name = "svdd"
     # This is an internal protocol grid, not a user-facing hyperparameter.
     TOPK_REJECT_RATIOS = (0.10, 0.20, 0.30, 0.40, 0.50)
+    SCORE_MODES = ("legacy", "recon", "combined", "svdd")
 
     def __init__(
         self,
@@ -68,6 +69,11 @@ class SVDDDefense(BaseDefense):
         super().__init__(config, d_bn, device, model_fn, validation_loader)
         if not math.isfinite(float(config.alpha)) or not 0.0 <= float(config.alpha) <= 1.0:
             raise ValueError("alpha must be finite and in [0, 1].")
+        self.score_mode = str(getattr(config, "svdd_score_mode", "legacy")).lower().strip()
+        if self.score_mode not in self.SCORE_MODES:
+            raise ValueError(
+                f"svdd_score_mode must be one of {self.SCORE_MODES}, got {self.score_mode!r}."
+            )
         self._svdd_feat: Callable[[Dict[str, Tensor]], Tensor] = (
             svdd_feature_extractor or extract_bn_features
         )
@@ -108,6 +114,59 @@ class SVDDDefense(BaseDefense):
         )
         self.reconstruction_objective = ReconstructionObjective()
         self.svdd_objective = SVDDObjective()
+
+    @staticmethod
+    def _rank_score(values: Tensor) -> Tensor:
+        """Map finite anomaly values to [0, 1] ranks, preserving invalid rows."""
+
+        values = values.float()
+        finite = torch.isfinite(values)
+        result = torch.full_like(values, float("inf"))
+        indices = torch.where(finite)[0]
+        if indices.numel() == 0:
+            return result
+        order = indices[torch.argsort(values[indices], stable=True)]
+        if order.numel() == 1:
+            result[order] = 0.0
+        else:
+            result[order] = torch.arange(
+                order.numel(), device=values.device, dtype=values.dtype
+            ) / float(order.numel() - 1)
+        return result
+
+    def _selection_score(
+        self,
+        reconstruction: Tensor,
+        svdd: Tensor,
+        *,
+        phase: str,
+    ) -> Tensor:
+        """Build the phase-specific score used by validation Top-K selection."""
+
+        mode = self.score_mode
+        if mode == "legacy":
+            score = reconstruction if phase == "phase1" else svdd
+        elif mode == "recon":
+            score = reconstruction
+        elif mode == "svdd":
+            score = svdd
+        else:  # combined
+            recon_rank = self._rank_score(reconstruction)
+            svdd_rank = self._rank_score(svdd)
+            score = 0.5 * (recon_rank + svdd_rank)
+        valid = torch.isfinite(reconstruction) & torch.isfinite(svdd)
+        return torch.where(valid, score, torch.full_like(score, float("inf")))
+
+    def _phase1_svdd_proxy(self, embeddings: Tensor, finite_rows: Tensor) -> Tensor:
+        """Use the current embedding median as a provisional SVDD center."""
+
+        proxy = torch.full(
+            (embeddings.shape[0],), float("inf"), device=embeddings.device
+        )
+        if bool(finite_rows.any().item()):
+            center = embeddings[finite_rows].median(dim=0).values
+            proxy[finite_rows] = ((embeddings[finite_rows] - center) ** 2).sum(dim=1)
+        return proxy
 
     def _validation_accuracy(self) -> float:
         if self.validation_loader is None:
@@ -291,7 +350,17 @@ class SVDDDefense(BaseDefense):
 
     def phase1_step(
         self, round_idx: int, client_state_dicts: List[Dict[str, Tensor]]
-    ) -> Tuple[float, float, float, Tensor, Tensor, float, float, Dict[str, float]]:
+    ) -> Tuple[
+        float,
+        float,
+        float,
+        Tensor,
+        Tensor,
+        Tensor,
+        float,
+        float,
+        Dict[str, float],
+    ]:
         """Train the AE and select the trusted Phase-1 clients.
 
         Train on all finite rows, rank clients by reconstruction error, and let
@@ -299,8 +368,9 @@ class SVDDDefense(BaseDefense):
 
         Returns:
             center_norm, z_variance, ae_loss,
-            per-client reconstruction loss, keep mask, selected reject ratio,
-            selected validation accuracy, candidate validation accuracies
+            selection score, per-client reconstruction loss, keep mask,
+            selected reject ratio, selected validation accuracy, candidate
+            validation accuracies
         """
 
         raw_X = self._build_input_matrix(client_state_dicts)  # (K, D_feat)
@@ -326,13 +396,24 @@ class SVDDDefense(BaseDefense):
                 per_client_loss,
                 torch.full_like(per_client_loss, float("inf")),
             )
+            embeddings = self.ae.encode(X_device)
+            svdd_proxy = self._phase1_svdd_proxy(
+                embeddings, finite_rows.to(self.device)
+            )
+            selection_scores = self._selection_score(
+                per_client_loss,
+                svdd_proxy,
+                phase="phase1",
+            )
         keep_mask, weights, selected_ratio, validation_accuracy, candidates = (
-            self._select_topk_by_validation(per_client_loss.detach().cpu(), client_state_dicts)
+            self._select_topk_by_validation(
+                selection_scores.detach().cpu(), client_state_dicts
+            )
         )
 
         with torch.no_grad():
             self.ae.eval()
-            Z = self.ae.encode(X.to(self.device))
+            Z = embeddings
             z_var = Z.var().item()
             center_norm = 0.0 if self.c is None else float(self.c.norm().item())
 
@@ -340,6 +421,7 @@ class SVDDDefense(BaseDefense):
             center_norm,
             z_var,
             float(loss.item()),
+            selection_scores.detach().cpu(),
             per_client_loss.detach().cpu(),
             keep_mask.detach().cpu(),
             float(selected_ratio),
@@ -362,9 +444,15 @@ class SVDDDefense(BaseDefense):
             finite_recon = finite_rows & torch.isfinite(recon_error)
             if not bool(finite_recon.any().item()):
                 raise FloatingPointError("No finite clients are available to initialize SVDD center.")
+            svdd_proxy = self._phase1_svdd_proxy(Z, finite_recon)
+            selection_scores = self._selection_score(
+                recon_error,
+                svdd_proxy,
+                phase="phase1",
+            )
             finite_indices = torch.where(finite_recon)[0]
             selected = _lower_quantile_mask(
-                recon_error[finite_recon],
+                selection_scores[finite_recon],
                 self.config.center_init_quantile,
                 parameter_name="center_init_quantile",
             )
@@ -389,6 +477,7 @@ class SVDDDefense(BaseDefense):
         Tensor,
         Tensor,
         Tensor,
+        Tensor,
         float,
         float,
         Dict[str, float],
@@ -397,8 +486,9 @@ class SVDDDefense(BaseDefense):
 
         Returns:
             center_norm, z_variance, svdd_loss_value, recon_loss_value,
-            d, M, alpha, per-client reconstruction loss, selected reject ratio,
-            validation accuracy, candidate validation accuracies
+            d, selection score, M, alpha, per-client reconstruction loss,
+            selected reject ratio, validation accuracy, candidate validation
+            accuracies
         """
 
         assert self.c is not None, "SVDD center c must be initialized before Phase 2."
@@ -429,8 +519,15 @@ class SVDDDefense(BaseDefense):
             d,
             torch.full_like(d, float("inf")),
         )
+        selection_scores = self._selection_score(
+            recon_per_client.to(self.device),
+            d,
+            phase="phase2",
+        )
         M, alpha, selected_ratio, validation_accuracy, candidates = (
-            self._select_topk_by_validation(d.detach().cpu(), client_state_dicts)
+            self._select_topk_by_validation(
+                selection_scores.detach().cpu(), client_state_dicts
+            )
         )
 
         trusted = M > 0.5
@@ -490,6 +587,7 @@ class SVDDDefense(BaseDefense):
             float(svdd_loss.item()),
             float(recon_loss.item()),
             d.detach().cpu(),
+            selection_scores.detach().cpu(),
             M.detach().cpu(),
             alpha.detach().cpu(),
             recon_per_client,
@@ -508,6 +606,7 @@ class SVDDDefense(BaseDefense):
             z_var,
             ae_loss,
             scores,
+            recon_scores,
             keep_mask,
             selected_ratio,
             validation_accuracy,
@@ -529,6 +628,7 @@ class SVDDDefense(BaseDefense):
             monitor_items=[
                 ("Defense", "SVDD"),
                 ("Feature Mode", str(self.config.svdd_feature_mode)),
+                ("Score Mode", self.score_mode),
                 ("Kept clients", f"{kept}/{total}"),
                 ("Selected reject ratio", f"{selected_ratio:.2f}"),
                 ("Validation accuracy", f"{validation_accuracy:.6f}"),
@@ -543,7 +643,10 @@ class SVDDDefense(BaseDefense):
                 "validation_accuracy": validation_accuracy,
                 "validation_candidates": candidates,
             },
-            participant_metrics={"reconstruction_loss": scores.detach().cpu()},
+            participant_metrics={
+                "selection_score": scores.detach().cpu(),
+                "reconstruction_loss": recon_scores.detach().cpu(),
+            },
         )
 
     def _phase2_result(
@@ -557,7 +660,8 @@ class SVDDDefense(BaseDefense):
             z_var,
             svdd_loss,
             recon_loss,
-            scores,
+            svdd_scores,
+            selection_scores,
             accepted,
             weights,
             recon_per_client,
@@ -569,7 +673,7 @@ class SVDDDefense(BaseDefense):
         total = len(client_state_dicts)
         total_loss = self.config.alpha * svdd_loss + (1.0 - self.config.alpha) * recon_loss
         total_per_client = (
-            self.config.alpha * scores
+            self.config.alpha * svdd_scores
             + (1.0 - self.config.alpha) * recon_per_client
         )
         return RoundStats(
@@ -579,7 +683,7 @@ class SVDDDefense(BaseDefense):
             svdd_loss=svdd_loss,
             recon_loss=recon_loss,
             total_loss=total_loss,
-            d=scores,
+            d=selection_scores,
             m=accepted,
             alpha=weights,
             phase="filtering",
@@ -587,6 +691,7 @@ class SVDDDefense(BaseDefense):
             monitor_items=[
                 ("Defense", "SVDD"),
                 ("Feature Mode", str(self.config.svdd_feature_mode)),
+                ("Score Mode", self.score_mode),
                 ("Kept clients", f"{kept}/{total}"),
                 ("Selected reject ratio", f"{selected_ratio:.2f}"),
                 ("Validation accuracy", f"{validation_accuracy:.6f}"),
@@ -599,8 +704,9 @@ class SVDDDefense(BaseDefense):
                 "validation_candidates": candidates,
             },
             participant_metrics={
-                "svdd_loss": scores.detach().cpu(),
+                "svdd_loss": svdd_scores.detach().cpu(),
                 "reconstruction_loss": recon_per_client.detach().cpu(),
+                "selection_score": selection_scores.detach().cpu(),
                 "total_loss": total_per_client.detach().cpu(),
             },
         )
