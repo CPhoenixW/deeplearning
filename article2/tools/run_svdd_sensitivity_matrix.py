@@ -186,6 +186,7 @@ def _build_jobs(
     rounds: int,
     force: bool,
     max_jobs: int | None,
+    clean_reference_ratio: float,
 ) -> list[tuple[str, str, Path, Path, int, float, str, int]]:
     jobs: list[tuple[str, str, Path, Path, int, float, str, int]] = []
     # Interleave factors and attacks so every GPU sees a mix of client counts,
@@ -196,9 +197,18 @@ def _build_jobs(
         for ratio in malicious_ratios
         for mode in modes
     ]
+    # A clean run is independent of ``num_malicious``.  Keep one reference
+    # ratio so the clean control does not multiply the matrix by four.
+    has_clean_attack = "none" in attacks
     for seed in seeds:
-        for attack in attacks:
-            for p1, ratio, mode in factors:
+        for p1, ratio, mode in factors:
+            for attack in attacks:
+                if (
+                    attack == "none"
+                    and has_clean_attack
+                    and abs(float(ratio) - float(clean_reference_ratio)) > 1e-9
+                ):
+                    continue
                 config_path, output_dir = _write_config(
                     root,
                     task=task,
@@ -248,6 +258,12 @@ def main() -> int:
     parser.add_argument("--gpus", default="0,1,2")
     parser.add_argument("--workers-per-gpu", type=int, default=12)
     parser.add_argument("--omp-threads", type=int, default=1)
+    parser.add_argument(
+        "--clean-reference-ratio",
+        type=float,
+        default=0.30,
+        help="Run the attack=none control only at this ratio (the ratio has no effect for clean clients).",
+    )
     parser.add_argument("--output-root", type=Path, default=Path("log/fashion_mnist_svdd_sensitivity_screen"))
     parser.add_argument("--python", dest="python_bin", default=".venv/bin/python")
     parser.add_argument("--force", action="store_true")
@@ -270,6 +286,11 @@ def main() -> int:
         parser.error("each phase1 round count must be less than total rounds")
     if args.workers_per_gpu < 1 or args.omp_threads < 1:
         parser.error("workers-per-gpu and omp-threads must be positive")
+    if "none" in attacks and not any(
+        abs(float(ratio) - float(args.clean_reference_ratio)) <= 1e-9
+        for ratio in ratios
+    ):
+        parser.error("clean-reference-ratio must be one of --malicious-ratios when attack=none is selected")
 
     root = args.output_root.resolve()
     jobs = _build_jobs(
@@ -283,8 +304,16 @@ def main() -> int:
         rounds=int(args.rounds),
         force=bool(args.force),
         max_jobs=args.max_jobs,
+        clean_reference_ratio=float(args.clean_reference_ratio),
     )
-    total_expected = len(phase1_rounds) * len(ratios) * len(modes) * len(seeds) * len(attacks)
+    clean_factor_count = 1 if "none" in attacks else 0
+    non_clean_attack_count = len(attacks) - clean_factor_count
+    total_expected = (
+        len(phase1_rounds)
+        * len(modes)
+        * len(seeds)
+        * (len(ratios) * non_clean_attack_count + clean_factor_count)
+    )
     print(
         f"jobs={len(jobs)} expected={total_expected} task={args.task} rounds={args.rounds} "
         f"gpus={list(gpus)} workers_per_gpu={args.workers_per_gpu} omp_threads={args.omp_threads}"
