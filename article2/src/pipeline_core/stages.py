@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..defenses.base import DefenseContext
+from ..utils import clip_client_updates
 from .contracts import PipelineContext, Stage
 
 
@@ -116,6 +117,23 @@ class AttackStage:
 
 
 @dataclass(frozen=True)
+class UploadClipStage:
+    """Apply the common post-attack client-update clipping boundary."""
+
+    name: str = "upload_clip"
+
+    def run(self, context: PipelineContext) -> PipelineContext:
+        states, stats = clip_client_updates(
+            context.client_states,
+            context.global_state,
+            max_norm=context.config.client_update_clip,
+        )
+        context.client_states = states
+        context.upload_clip_stats = stats
+        return context
+
+
+@dataclass(frozen=True)
 class DefenseStage:
     name: str = "defense"
 
@@ -191,4 +209,5 @@ __all__ = [
     "EvaluationStage",
     "OutputStage",
     "RoundPipeline",
+    "UploadClipStage",
 ]

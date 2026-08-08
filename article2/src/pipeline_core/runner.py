@@ -32,6 +32,7 @@ from .stages import (
     EvaluationStage,
     OutputStage,
     RoundPipeline,
+    UploadClipStage,
 )
 
 
@@ -283,6 +284,12 @@ def _build_round_event(context: PipelineContext) -> Dict[str, Any]:
     fpr = float(fp / max(1, fp + tn))
     total_clients = max(1, tp + fp + tn + fn)
     diagnostics = _round_diagnostics(context)
+    diagnostics.update(
+        {
+            f"upload_{key}": float(value)
+            for key, value in context.upload_clip_stats.items()
+        }
+    )
     result.diagnostics.update(diagnostics)
     return {
         "round": context.round_idx,
@@ -346,6 +353,7 @@ def run_pipeline(context: PipelineContext) -> PipelineContext:
     RoundPipeline(
         ClientTrainStage(train_clients_batched_or_serial),
         AttackStage(apply_round_attack),
+        UploadClipStage(),
         DefenseStage(),
         EvaluationStage(evaluate, _build_round_event, _evaluate_extra),
         OutputStage(print_round_event),

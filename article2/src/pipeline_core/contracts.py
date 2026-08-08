@@ -34,6 +34,7 @@ class PipelineContext:
     global_state: Dict[str, Any] = field(default_factory=dict)
     training_state: Dict[str, Any] = field(default_factory=dict)
     client_states: List[Dict[str, Any]] = field(default_factory=list)
+    upload_clip_stats: Dict[str, float] = field(default_factory=dict)
     defense_result: Any = None
     evaluation: Dict[str, Any] = field(default_factory=dict)
     event: Dict[str, Any] = field(default_factory=dict)

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.func import functional_call, grad, vmap
 
-from .clients import BenignClient
+from .clients import BenignClient, resolve_clip_norm
 from .config import FedConfig
 
 
@@ -23,6 +23,9 @@ class BatchedClientExecutor:
         self.config = config
         self.device = device
         self.group_size = int(config.client_batch_group_size)
+        self.grad_clip = resolve_clip_norm(
+            config.client_grad_clip, name="client_grad_clip"
+        )
         if self.group_size < 2:
             raise ValueError("client_batch_group_size must be at least 2.")
         if self.device.type != "cuda":
@@ -53,6 +56,36 @@ class BatchedClientExecutor:
             in_dims=(0, 0, 0, 0),
             randomness="different",
         )
+
+    def _clip_batched_gradients(
+        self, grads: Dict[str, Tensor], count: int
+    ) -> Dict[str, Tensor]:
+        """Independently clip each client's vmap gradient to the configured norm."""
+
+        if self.grad_clip is None:
+            return grads
+        norm_sq = torch.zeros(count, device=self.device, dtype=torch.float64)
+        finite = torch.ones(count, device=self.device, dtype=torch.bool)
+        for grad_tensor in grads.values():
+            flat = grad_tensor.detach().reshape(count, -1)
+            finite = finite & torch.isfinite(flat).all(dim=1)
+            safe = torch.where(torch.isfinite(flat), flat, torch.zeros_like(flat))
+            norm_sq = norm_sq + safe.to(torch.float64).square().sum(dim=1)
+        norms = norm_sq.sqrt()
+        finite = finite & torch.isfinite(norms)
+        scales = torch.zeros(count, device=self.device, dtype=torch.float32)
+        scales[finite] = torch.clamp(
+            float(self.grad_clip) / norms[finite].to(torch.float32).clamp_min(1e-12),
+            max=1.0,
+        )
+        clipped: Dict[str, Tensor] = {}
+        for name, grad_tensor in grads.items():
+            view = scales.view(count, *([1] * (grad_tensor.ndim - 1)))
+            keep = finite.view(count, *([1] * (grad_tensor.ndim - 1)))
+            clipped[name] = torch.where(
+                keep, grad_tensor * view, torch.zeros_like(grad_tensor)
+            )
+        return clipped
 
     def can_batch(self, clients: Sequence[BenignClient]) -> bool:
         if len(clients) != self.group_size:
@@ -131,6 +164,7 @@ class BatchedClientExecutor:
                 x_group = torch.stack(xs, dim=0)
                 y_group = torch.stack(ys, dim=0)
                 grads = self._batched_grad(params, buffers, x_group, y_group)
+                grads = self._clip_batched_gradients(grads, count)
                 with torch.no_grad():
                     for name, value in params.items():
                         update = grads[name]

@@ -49,6 +49,12 @@ class FedConfig:
     client_lr: float = 0.1
     client_momentum: float = 0.9
     client_weight_decay: float = 5e-4
+    # Fixed numerical-stability guards.  ``client_grad_clip`` bounds every
+    # local SGD gradient norm; ``client_update_clip`` bounds the complete
+    # post-attack model delta uploaded by a participant.  ``None`` keeps the
+    # historical behavior for configurations that do not opt in.
+    client_grad_clip: float | None = None
+    client_update_clip: float | None = None
     # 每轮通信前：客户端在本地数据上完整遍历训练多少次（epoch），再上传参与聚合。
     local_epochs: int = 1
     batch_size: int = 64

@@ -8,6 +8,7 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
 from ..config import FedConfig
+from ..utils import state_dict_is_finite
 
 
 @dataclass(frozen=True)
@@ -86,11 +87,33 @@ class BaseDefense:
         self.param_names: List[str] = [
             name for name, _parameter in self.global_model.named_parameters()
         ]
-
-    def state_dict_for_clients(self) -> Dict[str, Tensor]:
-        return {
+        self._last_finite_global_state = {
             key: value.detach().cpu().clone()
             for key, value in self.global_model.state_dict().items()
+        }
+        self._global_state_rolled_back = False
+
+    def state_dict_for_clients(self) -> Dict[str, Tensor]:
+        state = {
+            key: value.detach().cpu().clone()
+            for key, value in self.global_model.state_dict().items()
+        }
+        if state_dict_is_finite(state):
+            self._last_finite_global_state = {
+                key: value.detach().cpu().clone() for key, value in state.items()
+            }
+            self._global_state_rolled_back = False
+            return state
+
+        # Keep a bad aggregation from becoming the starting point for every
+        # client in the next communication round.  The last finite model is a
+        # deterministic no-progress fallback and is preferable to letting all
+        # local updates become NaN/Inf.
+        self.global_model.load_state_dict(self._last_finite_global_state)
+        self._global_state_rolled_back = True
+        return {
+            key: value.detach().cpu().clone()
+            for key, value in self._last_finite_global_state.items()
         }
 
     @property
@@ -134,6 +157,7 @@ class BaseDefense:
                 "total_loss": result.total_loss,
                 "kept": int((result.m >= 0.5).sum().item()),
                 "num_clients": count,
+                "global_state_rolled_back": float(self._global_state_rolled_back),
             }
         )
         return result

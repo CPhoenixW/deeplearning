@@ -10,7 +10,13 @@ from src.config import (
     load_hyperparameter_table,
     resolve_hyperparameters,
 )
-from src.utils import aggregate_trimmed_mean, compute_multi_krum_scores, weighted_fedavg
+from src.defenses.base import BaseDefense
+from src.utils import (
+    aggregate_trimmed_mean,
+    clip_client_updates,
+    compute_multi_krum_scores,
+    weighted_fedavg,
+)
 
 
 def _tiny_state(value: float) -> dict[str, torch.Tensor]:
@@ -93,3 +99,29 @@ def test_multi_krum_scores_support_explicit_device() -> None:
     implicit = compute_multi_krum_scores(states, num_byzantine=1)
     explicit = compute_multi_krum_scores(states, num_byzantine=1, device="cpu")
     assert torch.equal(implicit, explicit)
+
+
+def test_upload_clipping_bounds_updates_and_neutralizes_nonfinite_uploads() -> None:
+    reference = _tiny_state(0.0)
+    states = [_tiny_state(6.0), _tiny_state(float("nan"))]
+
+    clipped, stats = clip_client_updates(states, reference, max_norm=2.0)
+
+    delta = clipped[0]["weight"] - reference["weight"]
+    assert torch.linalg.vector_norm(delta).item() <= 2.0 + 1e-6
+    assert torch.equal(clipped[1]["weight"], reference["weight"])
+    assert stats["clipped_count"] == 2.0
+    assert stats["nonfinite_replaced_count"] == 1.0
+
+
+def test_base_defense_restores_last_finite_global_state() -> None:
+    model_fn = lambda: nn.Linear(2, 1)
+    defense = BaseDefense(FedConfig(), 1, torch.device("cpu"), model_fn)
+    expected = defense.state_dict_for_clients()
+    with torch.no_grad():
+        defense.global_model.weight.fill_(float("nan"))
+
+    restored = defense.state_dict_for_clients()
+
+    assert torch.equal(restored["weight"], expected["weight"])
+    assert torch.isfinite(restored["weight"]).all()

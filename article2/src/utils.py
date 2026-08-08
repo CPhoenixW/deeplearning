@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Callable, Dict, Iterable, List
+from typing import Callable, Dict, Iterable, List, Tuple
 
 import torch
 from torch import Tensor
@@ -179,7 +179,7 @@ def robust_zscore(x: Tensor) -> Tensor:
     return (x - med) / m
 
 
-def _state_dict_is_finite(state_dict: Dict[str, Tensor]) -> bool:
+def state_dict_is_finite(state_dict: Dict[str, Tensor]) -> bool:
     """Return whether all floating-point state entries are finite.
 
     Integer buffers (for example ``num_batches_tracked``) are finite by
@@ -192,6 +192,117 @@ def _state_dict_is_finite(state_dict: Dict[str, Tensor]) -> bool:
         ):
             return False
     return True
+
+
+def _clone_state_dict(state_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
+    return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
+
+
+def clip_client_updates(
+    client_state_dicts: List[Dict[str, Tensor]],
+    reference_state_dict: Dict[str, Tensor],
+    *,
+    max_norm: float | None,
+) -> Tuple[List[Dict[str, Tensor]], Dict[str, float]]:
+    """Bound post-attack client model deltas by a global L2 norm.
+
+    Clients upload model states rather than literal gradients.  This function
+    therefore clips ``delta_i = w_i - w_global`` *after* attack hooks have
+    run, which makes the same stability boundary apply to benign, SF, LIE,
+    BD, and mixed uploads.  A non-finite upload is converted to the finite
+    reference state (a no-op update), rather than allowing one invalid tensor
+    to poison feature extraction or aggregation.
+    """
+
+    if max_norm is None:
+        return client_state_dicts, {
+            "enabled": 0.0,
+            "clip_norm": 0.0,
+            "clipped_count": 0.0,
+            "nonfinite_replaced_count": 0.0,
+            "clip_fraction": 0.0,
+            "update_norm_median": 0.0,
+            "update_norm_max": 0.0,
+        }
+    bound = float(max_norm)
+    if not math.isfinite(bound) or bound <= 0.0:
+        raise ValueError("client_update_clip must be a positive finite value or None.")
+    if not client_state_dicts:
+        return [], {
+            "enabled": 1.0,
+            "clip_norm": bound,
+            "clipped_count": 0.0,
+            "nonfinite_replaced_count": 0.0,
+            "clip_fraction": 0.0,
+            "update_norm_median": 0.0,
+            "update_norm_max": 0.0,
+        }
+
+    reference = _clone_state_dict(reference_state_dict)
+    clipped_states: List[Dict[str, Tensor]] = []
+    finite_norms: List[float] = []
+    clipped_count = 0
+    nonfinite_replaced_count = 0
+
+    for state_dict in client_state_dicts:
+        if state_dict.keys() != reference.keys():
+            raise ValueError("Client and reference state_dict keys do not match.")
+        squared_norm = 0.0
+        valid = True
+        for key, reference_value in reference.items():
+            client_value = state_dict[key]
+            if client_value.shape != reference_value.shape:
+                raise ValueError(
+                    f"State shape mismatch for {key!r}: "
+                    f"{tuple(client_value.shape)} vs {tuple(reference_value.shape)}."
+                )
+            if not (client_value.is_floating_point() or torch.is_complex(client_value)):
+                continue
+            delta = client_value.detach().cpu().to(torch.float64) - reference_value.to(torch.float64)
+            if not bool(torch.isfinite(delta).all().item()):
+                valid = False
+                break
+            squared_norm += float((delta.abs().square().sum()).item())
+
+        if not valid or not math.isfinite(squared_norm):
+            clipped_states.append(_clone_state_dict(reference))
+            clipped_count += 1
+            nonfinite_replaced_count += 1
+            continue
+
+        norm = math.sqrt(max(0.0, squared_norm))
+        finite_norms.append(norm)
+        scale = min(1.0, bound / max(norm, 1e-12))
+        if scale < 1.0:
+            clipped_count += 1
+        clipped_state: Dict[str, Tensor] = {}
+        for key, reference_value in reference.items():
+            client_value = state_dict[key].detach().cpu()
+            if client_value.is_floating_point() or torch.is_complex(client_value):
+                value = reference_value.to(torch.float64) + scale * (
+                    client_value.to(torch.float64) - reference_value.to(torch.float64)
+                )
+                clipped_state[key] = value.to(dtype=client_value.dtype).clone()
+            else:
+                clipped_state[key] = client_value.clone()
+        clipped_states.append(clipped_state)
+
+    return clipped_states, {
+        "enabled": 1.0,
+        "clip_norm": bound,
+        "clipped_count": float(clipped_count),
+        "nonfinite_replaced_count": float(nonfinite_replaced_count),
+        "clip_fraction": float(clipped_count / len(client_state_dicts)),
+        "update_norm_median": float(torch.tensor(finite_norms).median().item())
+        if finite_norms
+        else 0.0,
+        "update_norm_max": max(finite_norms, default=0.0),
+    }
+
+
+# Keep this private alias for compatibility with callers added before the
+# public helper was needed by the upload-clipping pipeline stage.
+_state_dict_is_finite = state_dict_is_finite
 
 
 def weighted_fedavg(

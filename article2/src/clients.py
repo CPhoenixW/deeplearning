@@ -7,12 +7,24 @@ from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from .config import FedConfig
 
 
 ModelFactory = Callable[[], nn.Module]
+
+
+def resolve_clip_norm(value: float | None, *, name: str) -> float | None:
+    """Validate an optional positive gradient/update clipping threshold."""
+
+    if value is None:
+        return None
+    threshold = float(value)
+    if not torch.isfinite(torch.tensor(threshold)) or threshold <= 0.0:
+        raise ValueError(f"{name} must be a positive finite value or None.")
+    return threshold
 
 
 class BaseClient(ABC):
@@ -55,6 +67,9 @@ class BenignClient(BaseClient):
         self._criterion = nn.CrossEntropyLoss()
         self._amp_enabled = bool(config.use_amp and device.type == "cuda")
         self._scaler = torch.amp.GradScaler("cuda", enabled=self._amp_enabled)
+        self._grad_clip = resolve_clip_norm(
+            config.client_grad_clip, name="client_grad_clip"
+        )
 
     def _build_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
         return torch.optim.SGD(
@@ -87,12 +102,44 @@ class BenignClient(BaseClient):
                 ):
                     logits = model(inputs)
                     loss = self._criterion(logits, labels)
+                if not bool(torch.isfinite(loss.detach()).item()):
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 if self._amp_enabled:
                     self._scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+                if self._amp_enabled:
+                    self._scaler.unscale_(optimizer)
+                if self._grad_clip is not None:
+                    parameters = [
+                        parameter
+                        for parameter in model.parameters()
+                        if parameter.grad is not None
+                    ]
+                    gradients_finite = all(
+                        bool(torch.isfinite(parameter.grad).all().item())
+                        for parameter in parameters
+                    )
+                    if not gradients_finite:
+                        optimizer.zero_grad(set_to_none=True)
+                        if self._amp_enabled:
+                            self._scaler.update()
+                        continue
+                    grad_norm = clip_grad_norm_(
+                        parameters,
+                        self._grad_clip,
+                        error_if_nonfinite=False,
+                    )
+                    if not bool(torch.isfinite(grad_norm).item()):
+                        optimizer.zero_grad(set_to_none=True)
+                        if self._amp_enabled:
+                            self._scaler.update()
+                        continue
+                if self._amp_enabled:
                     self._scaler.step(optimizer)
                     self._scaler.update()
                 else:
-                    loss.backward()
                     optimizer.step()
 
     def _postprocess_upload(
