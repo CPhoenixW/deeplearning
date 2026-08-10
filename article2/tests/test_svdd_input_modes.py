@@ -110,7 +110,6 @@ def test_svdd_phase1_outputs_match_between_input_modes() -> None:
         num_benign=4,
         total_rounds=1,
         phase1_rounds=1,
-        ae_warmup_keep_ratio=1.0,
         latent_dim=8,
         svdd_feature_mode="task",
         svdd_input_mode="absolute",
