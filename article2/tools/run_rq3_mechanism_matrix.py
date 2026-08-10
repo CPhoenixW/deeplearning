@@ -43,6 +43,7 @@ BASE_OVERRIDES: dict[str, Any] = {
     "dirichlet_alpha": 1.0,
     "hf_datasets_offline": True,
     "mixed_attack_types": "lf,bd,gn",
+    "lie_z_override": 0.524,
     "latent_dim": 64,
     "ae_lr": 0.001,
     "ae_weight_decay": 1e-6,
@@ -111,7 +112,8 @@ def iter_specs(
 
 
 def _result_path(output_dir: Path, task: str, attack: str, mechanism: str) -> Path:
-    return output_dir / f"{task}__{attack}__{mechanism}.json"
+    defense = _mechanism_overrides(mechanism, 1)["defense"]
+    return output_dir / f"{task}__{attack}__{defense}.json"
 
 
 def _complete(

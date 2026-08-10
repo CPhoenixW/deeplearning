@@ -43,6 +43,7 @@ def test_rq3_matrix_has_explicit_mechanism_endpoints(tmp_path: Path) -> None:
     assert by_mechanism["full"]["fed_config_overrides"]["phase1_rounds"] == 15
     assert by_mechanism["full"]["fed_config_overrides"]["phase2_score_mode"] == "svdd"
     assert by_mechanism["full"]["fed_config_overrides"]["alpha"] == 0.5
+    assert by_mechanism["full"]["fed_config_overrides"]["lie_z_override"] == 0.524
     assert all(payload["fed_config_overrides"]["num_malicious"] == 0 for payload in payloads if payload["attacks"] == "none")
 
 
@@ -71,6 +72,6 @@ def test_rq3_result_paths_are_resumable(tmp_path: Path) -> None:
             },
             "rounds": [{}] * 20,
         }
-        (output_dir / f"fashion_mnist__{payload['attacks']}__{output_dir.parts[-4]}.json").write_text(json.dumps(result), encoding="utf-8")
+        (output_dir / f"fashion_mnist__{payload['attacks']}__{payload['defenses']}.json").write_text(json.dumps(result), encoding="utf-8")
     second = build_jobs(tmp_path / "rq3", **kwargs)
     assert len(second) == 7
