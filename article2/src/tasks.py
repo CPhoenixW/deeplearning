@@ -25,8 +25,7 @@ except ImportError:
     from models import ag_news_classifier, fashion_mnist_cnn, lenet_grayscale, resnet18_cifar10
 
 
-SERVER_VALIDATION_GROUPS = 50
-SERVER_VALIDATION_GROUP_SIZE = 64
+SERVER_VALIDATION_BATCH_SIZE = 64
 
 
 def _resolve_cifar10_root(config: FedConfig) -> str:
@@ -472,13 +471,12 @@ def _split_train_test_loaders(
         labels,
         num_classes=num_classes,
         seed=int(config.seed),
-        groups=SERVER_VALIDATION_GROUPS,
-        group_size=SERVER_VALIDATION_GROUP_SIZE,
+        size=int(config.server_validation_size),
     )
     validation_set = Subset(validation_dataset, validation_indices)
     validation_loader = DataLoader(
         validation_set,
-        batch_size=SERVER_VALIDATION_GROUP_SIZE,
+        batch_size=min(SERVER_VALIDATION_BATCH_SIZE, len(validation_set)),
         shuffle=False,
         num_workers=int(getattr(config, "num_workers", 0)),
         pin_memory=(config.device in ("cuda", "auto")),
@@ -533,14 +531,17 @@ def _validation_indices(
     *,
     num_classes: int,
     seed: int,
-    groups: int,
-    group_size: int,
+    size: int,
 ) -> List[int]:
-    """Select a deterministic, class-balanced clean server validation set."""
+    """Select exactly ``size`` deterministic, class-balanced clean samples."""
 
-    total = min(int(labels.numel()), int(groups) * int(group_size))
+    total = int(size)
     if total < 1:
-        raise ValueError("The server validation set cannot be empty.")
+        raise ValueError("server_validation_size must be at least 1.")
+    if total > int(labels.numel()):
+        raise ValueError(
+            "server_validation_size cannot exceed the available training samples."
+        )
     generator = torch.Generator().manual_seed(int(seed) + 104729)
     base = total // int(num_classes)
     remainder = total % int(num_classes)
