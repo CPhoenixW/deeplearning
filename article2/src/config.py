@@ -31,6 +31,10 @@ class FedConfig:
     num_clients: int = 50
     num_benign: int = 35
     total_rounds: int = 300
+    # Number of trusted, clean training samples withheld from all clients and
+    # used only for validation-driven server decisions. The paper default is 50;
+    # vary this field directly for validation-size sensitivity experiments.
+    server_validation_size: int = 50
     defense_type: str = "svdd"
     aggregation_method: str = "avg"
     trimmed_mean_ratio: float = 0.2
