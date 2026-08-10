@@ -63,11 +63,11 @@ def test_both_phases_use_validation_topk_and_alpha() -> None:
         assert result.phase in {"warmup", "filtering"}
         assert len(result.server_metrics["validation_candidates"]) == 5
         assert result.server_metrics["selected_reject_ratio"] in {
+            0.0,
             0.1,
             0.2,
             0.3,
             0.4,
-            0.5,
         }
         assert int(result.m.sum().item()) in {2, 3, 4}
     expected = phase2.svdd_loss * 0.25 + phase2.recon_loss * 0.75
@@ -106,4 +106,67 @@ def test_validation_ties_choose_largest_rejection_ratio() -> None:
     )
 
     assert set(candidates.values()) == {candidates["0.10"]}
-    assert selected_ratio == 0.5
+    assert selected_ratio == 0.4
+
+
+def test_zero_rejection_can_win_validation_selection() -> None:
+    config = FedConfig(
+        num_clients=5,
+        num_benign=5,
+        latent_dim=4,
+        param_descriptor_dim=64,
+        param_descriptor_device="cpu",
+        svdd_feature_mode="fixed_projection",
+        device="cpu",
+    )
+    validation = DataLoader(
+        TensorDataset(torch.zeros(10, 4), torch.zeros(10, dtype=torch.long)),
+        batch_size=10,
+    )
+    server = SVDDDefense(
+        config,
+        d_bn=64,
+        device=torch.device("cpu"),
+        model_fn=_TinyModel,
+        validation_loader=validation,
+    )
+    reference = server.state_dict_for_clients()
+    clients = [copy.deepcopy(reference) for _ in range(config.num_clients)]
+    calls = []
+
+    def prefer_first_candidate() -> float:
+        calls.append(len(calls))
+        return 1.0 - 0.01 * len(calls)
+
+    server._validation_accuracy = prefer_first_candidate  # type: ignore[method-assign]
+    _, _, selected_ratio, _, candidates = server._select_topk_by_validation(
+        torch.arange(config.num_clients, dtype=torch.float32), clients
+    )
+
+    assert len(calls) == 5
+    assert set(candidates) == {"0.00", "0.10", "0.20", "0.30", "0.40"}
+    assert selected_ratio == 0.0
+
+
+def test_phase_scores_are_independent_from_alpha() -> None:
+    config = FedConfig(
+        phase1_score_mode="recon",
+        phase2_score_mode="combined",
+        alpha=0.5,
+        num_clients=5,
+        num_benign=5,
+        latent_dim=4,
+        param_descriptor_dim=64,
+        param_descriptor_device="cpu",
+        svdd_feature_mode="fixed_projection",
+        device="cpu",
+    )
+    server = SVDDDefense(
+        config,
+        d_bn=64,
+        device=torch.device("cpu"),
+        model_fn=_TinyModel,
+    )
+    assert server.phase1_score_mode == "recon"
+    assert server.phase2_score_mode == "combined"
+    assert config.alpha == 0.5

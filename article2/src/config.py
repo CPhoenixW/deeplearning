@@ -172,11 +172,16 @@ class FedConfig:
     center_ema_decay: float = 0.9
     svdd_grad_clip: float = 1.0
     # Single tunable loss-mixing coefficient.  alpha=1 is pure SVDD;
-    # alpha=0 is pure reconstruction loss.
+    # alpha=0 is pure reconstruction loss.  This coefficient is independent
+    # of the client-selection score used in either phase.
     alpha: float = 0.5
-    # Detection score used in both SVDD phases for sensitivity ablations.
-    # ``legacy`` preserves the original protocol (reconstruction in Phase 1,
-    # SVDD distance in Phase 2); the new study uses recon/combined/svdd.
+    # New protocol fields.  ``None`` lets the compatibility field below
+    # resolve historical configs; formal experiments set Phase 2 explicitly.
+    phase1_score_mode: str | None = None
+    phase2_score_mode: str | None = None
+    # Deprecated compatibility field.  ``legacy`` means reconstruction in
+    # Phase 1 and SVDD distance in Phase 2.  A non-legacy value preserves old
+    # sensitivity runs that applied one mode to both phases.
     svdd_score_mode: str = "legacy"
     # Trusted-sample quantiles used by center initialization and Phase-2
     # reconstruction training. Values must be in (0, 1].

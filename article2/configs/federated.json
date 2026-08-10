@@ -1,8 +1,8 @@
 {
   "version": 1,
   "values": {
-    "num_clients": 50,
-    "num_malicious": 10,
+    "num_clients": 100,
+    "num_malicious": 30,
     "total_rounds": 300,
     "server_validation_size": 50,
     "client_lr": 0.05,

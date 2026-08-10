@@ -21,6 +21,8 @@
       "center_ema_decay": 0.9,
       "svdd_grad_clip": 1.0,
       "svdd_feature_clip": 10.0,
+      "phase1_score_mode": "recon",
+      "phase2_score_mode": "svdd",
       "alpha": 0.5,
       "center_init_quantile": 0.5,
       "phase2_recon_quantile": 0.8

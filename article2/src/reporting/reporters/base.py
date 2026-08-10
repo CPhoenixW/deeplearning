@@ -15,6 +15,10 @@ def _number(value: Any) -> Any:
         if value.numel() != 1:
             return value.detach().cpu().tolist()
         value = value.item()
+    if isinstance(value, dict):
+        return {str(key): _number(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_number(item) for item in value]
     if isinstance(value, float) and not math.isfinite(value):
         return None
     if isinstance(value, str):

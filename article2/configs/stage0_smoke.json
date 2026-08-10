@@ -1,0 +1,20 @@
+{
+  "task": "cifar10",
+  "attacks": "mix",
+  "defenses": "avg,tm,mk,lasa,seca,bnguard,dmc,svdd",
+  "log_dir": "log/article2_stage0/manual",
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "fed_config_overrides": {
+    "num_clients": 20,
+    "num_malicious": 6,
+    "total_rounds": 12,
+    "server_validation_size": 20,
+    "phase1_rounds": 3,
+    "phase1_score_mode": "recon",
+    "phase2_score_mode": "svdd",
+    "alpha": 0.5,
+    "lie_z_override": 0.524,
+    "device": "cuda"
+  }
+}

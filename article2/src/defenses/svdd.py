@@ -54,7 +54,7 @@ class SVDDDefense(BaseDefense):
 
     defense_name = "svdd"
     # This is an internal protocol grid, not a user-facing hyperparameter.
-    TOPK_REJECT_RATIOS = (0.10, 0.20, 0.30, 0.40, 0.50)
+    TOPK_REJECT_RATIOS = (0.0, 0.10, 0.20, 0.30, 0.40)
     SCORE_MODES = ("legacy", "recon", "combined", "svdd")
 
     def __init__(
@@ -69,11 +69,21 @@ class SVDDDefense(BaseDefense):
         super().__init__(config, d_bn, device, model_fn, validation_loader)
         if not math.isfinite(float(config.alpha)) or not 0.0 <= float(config.alpha) <= 1.0:
             raise ValueError("alpha must be finite and in [0, 1].")
-        self.score_mode = str(getattr(config, "svdd_score_mode", "legacy")).lower().strip()
-        if self.score_mode not in self.SCORE_MODES:
-            raise ValueError(
-                f"svdd_score_mode must be one of {self.SCORE_MODES}, got {self.score_mode!r}."
-            )
+        legacy_mode = str(getattr(config, "svdd_score_mode", "legacy") or "legacy").lower().strip()
+        phase1_mode = getattr(config, "phase1_score_mode", None)
+        phase2_mode = getattr(config, "phase2_score_mode", None)
+        if phase1_mode is None and phase2_mode is None:
+            if legacy_mode == "legacy":
+                phase1_mode, phase2_mode = "recon", "svdd"
+            else:
+                # Preserve old sensitivity configs that intentionally applied
+                # one score mode to both phases.
+                phase1_mode, phase2_mode = legacy_mode, legacy_mode
+        else:
+            phase1_mode = phase1_mode or "recon"
+            phase2_mode = phase2_mode or ("svdd" if legacy_mode == "legacy" else legacy_mode)
+        self.phase1_score_mode = self._normalize_score_mode(phase1_mode, "phase1_score_mode")
+        self.phase2_score_mode = self._normalize_score_mode(phase2_mode, "phase2_score_mode")
         self._svdd_feat: Callable[[Dict[str, Tensor]], Tensor] = (
             svdd_feature_extractor or extract_bn_features
         )
@@ -108,12 +118,24 @@ class SVDDDefense(BaseDefense):
         self.ae = AutoEncoder(d_bn=d_bn, latent_dim=latent_dim).to(self.device)
 
         self.c: Optional[Tensor] = None
+        self.center_shift = 0.0
 
         self.optimizer_ae = torch.optim.Adam(
             self.ae.parameters(), lr=config.ae_lr, weight_decay=config.ae_weight_decay
         )
         self.reconstruction_objective = ReconstructionObjective()
         self.svdd_objective = SVDDObjective()
+
+    @classmethod
+    def _normalize_score_mode(cls, value: object, field_name: str) -> str:
+        mode = str(value).lower().strip()
+        if mode == "legacy":
+            raise ValueError(f"{field_name} must resolve to recon, combined, or svdd.")
+        if mode not in cls.SCORE_MODES:
+            raise ValueError(
+                f"{field_name} must be one of {tuple(item for item in cls.SCORE_MODES if item != 'legacy')}, got {mode!r}."
+            )
+        return mode
 
     @staticmethod
     def _rank_score(values: Tensor) -> Tensor:
@@ -143,10 +165,8 @@ class SVDDDefense(BaseDefense):
     ) -> Tensor:
         """Build the phase-specific score used by validation Top-K selection."""
 
-        mode = self.score_mode
-        if mode == "legacy":
-            score = reconstruction if phase == "phase1" else svdd
-        elif mode == "recon":
+        mode = self.phase1_score_mode if phase == "phase1" else self.phase2_score_mode
+        if mode == "recon":
             score = reconstruction
         elif mode == "svdd":
             score = svdd
@@ -486,7 +506,7 @@ class SVDDDefense(BaseDefense):
 
         Returns:
             center_norm, z_variance, svdd_loss_value, recon_loss_value,
-            d, selection score, M, alpha, per-client reconstruction loss,
+            d, selection score, M, aggregation weights, per-client reconstruction loss,
             selected reject ratio, validation accuracy, candidate validation
             accuracies
         """
@@ -524,18 +544,20 @@ class SVDDDefense(BaseDefense):
             d,
             phase="phase2",
         )
-        M, alpha, selected_ratio, validation_accuracy, candidates = (
+        accepted_mask, aggregation_weights, selected_ratio, validation_accuracy, candidates = (
             self._select_topk_by_validation(
                 selection_scores.detach().cpu(), client_state_dicts
             )
         )
 
-        trusted = M > 0.5
+        trusted = accepted_mask > 0.5
+        self.center_shift = 0.0
         if trusted.sum() > 0:
             with torch.no_grad():
                 c_new = Z[trusted].mean(dim=0)
                 c_updated = self.config.center_ema_decay * c + (1.0 - self.config.center_ema_decay) * c_new
                 c_updated[c_updated.abs() < 0.01] = 0.01
+                self.center_shift = float((c_updated - c).norm().item())
                 self.c = c_updated.detach()
 
         self.ae.train()
@@ -572,7 +594,7 @@ class SVDDDefense(BaseDefense):
         # Weighted aggregation
         global_sd = weighted_fedavg(
             client_state_dicts,
-            alpha.detach().cpu(),
+            aggregation_weights.detach().cpu(),
             device=self.aggregation_device,
         )
         self.global_model.load_state_dict(global_sd)
@@ -588,8 +610,8 @@ class SVDDDefense(BaseDefense):
             float(recon_loss.item()),
             d.detach().cpu(),
             selection_scores.detach().cpu(),
-            M.detach().cpu(),
-            alpha.detach().cpu(),
+            accepted_mask.detach().cpu(),
+            aggregation_weights.detach().cpu(),
             recon_per_client,
             float(selected_ratio),
             float(validation_accuracy),
@@ -628,7 +650,8 @@ class SVDDDefense(BaseDefense):
             monitor_items=[
                 ("Defense", "SVDD"),
                 ("Feature Mode", str(self.config.svdd_feature_mode)),
-                ("Score Mode", self.score_mode),
+                ("Phase 1 Score", self.phase1_score_mode),
+                ("Phase 2 Score", self.phase2_score_mode),
                 ("Kept clients", f"{kept}/{total}"),
                 ("Selected reject ratio", f"{selected_ratio:.2f}"),
                 ("Validation accuracy", f"{validation_accuracy:.6f}"),
@@ -642,6 +665,9 @@ class SVDDDefense(BaseDefense):
                 "selected_reject_ratio": selected_ratio,
                 "validation_accuracy": validation_accuracy,
                 "validation_candidates": candidates,
+                "center_shift": 0.0,
+                "accepted_client_ids": torch.where(keep_mask > 0.5)[0].tolist(),
+                "aggregation_weights": weights.tolist(),
             },
             participant_metrics={
                 "selection_score": scores.detach().cpu(),
@@ -663,7 +689,7 @@ class SVDDDefense(BaseDefense):
             svdd_scores,
             selection_scores,
             accepted,
-            weights,
+            aggregation_weights,
             recon_per_client,
             selected_ratio,
             validation_accuracy,
@@ -685,13 +711,14 @@ class SVDDDefense(BaseDefense):
             total_loss=total_loss,
             d=selection_scores,
             m=accepted,
-            alpha=weights,
+            alpha=aggregation_weights,
             phase="filtering",
             show_detection=True,
             monitor_items=[
                 ("Defense", "SVDD"),
                 ("Feature Mode", str(self.config.svdd_feature_mode)),
-                ("Score Mode", self.score_mode),
+                ("Phase 1 Score", self.phase1_score_mode),
+                ("Phase 2 Score", self.phase2_score_mode),
                 ("Kept clients", f"{kept}/{total}"),
                 ("Selected reject ratio", f"{selected_ratio:.2f}"),
                 ("Validation accuracy", f"{validation_accuracy:.6f}"),
@@ -702,6 +729,9 @@ class SVDDDefense(BaseDefense):
                 "selected_reject_ratio": selected_ratio,
                 "validation_accuracy": validation_accuracy,
                 "validation_candidates": candidates,
+                "center_shift": self.center_shift,
+                "accepted_client_ids": torch.where(accepted > 0.5)[0].tolist(),
+                "aggregation_weights": aggregation_weights.tolist(),
             },
             participant_metrics={
                 "svdd_loss": svdd_scores.detach().cpu(),

@@ -23,8 +23,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Canonical registry names accepted by this comparison scheduler.  Keep the
 # default CLI value below as the original three baselines, while allowing an
 # extended matrix to opt into the additional defenses without a second runner.
-SUPPORTED_DEFENSES = ("avg", "tm", "mk", "alignins", "bnguard", "dmc", "lasa", "fld")
-CORE_DEFENSES = ("avg", "tm", "mk")
+SUPPORTED_DEFENSES = ("avg", "tm", "mk", "lasa", "seca", "bnguard", "dmc", "fld")
+CORE_DEFENSES = SUPPORTED_DEFENSES
 DEFAULT_ATTACKS = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
 
 # Match the C002-derived Fashion-MNIST AE-SVDD runs except for defense-specific
@@ -191,6 +191,10 @@ def main() -> int:
         parser.error(f"Unsupported comparison defenses: {unknown_defenses}")
     if unknown_attacks:
         parser.error(f"Unsupported attack IDs: {unknown_attacks}")
+    if str(args.task).lower().strip() == "ag_news":
+        forbidden = sorted(set(attacks) & {"bd", "mix"})
+        if forbidden:
+            parser.error(f"AG News does not support image-trigger attacks: {forbidden}")
     if args.rounds < 1 or args.workers_per_gpu < 1 or args.omp_threads < 1:
         parser.error("--rounds, --workers-per-gpu, and --omp-threads must be positive")
 
