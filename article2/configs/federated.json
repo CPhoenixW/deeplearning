@@ -4,6 +4,7 @@
     "num_clients": 50,
     "num_malicious": 10,
     "total_rounds": 300,
+    "server_validation_size": 50,
     "client_lr": 0.05,
     "client_momentum": 0.9,
     "client_weight_decay": 0.0005,
