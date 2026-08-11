@@ -25,7 +25,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # extended matrix to opt into the additional defenses without a second runner.
 SUPPORTED_DEFENSES = ("avg", "tm", "mk", "lasa", "seca", "bnguard", "dmc", "fld")
 CORE_DEFENSES = SUPPORTED_DEFENSES
-DEFAULT_ATTACKS = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
+DEFAULT_ATTACKS = (
+    "none",
+    "gn",
+    "lf",
+    "sf",
+    "bd",
+    "lie",
+    "minmax",
+    "minsum",
+    "mix",
+)
 
 # Match the C002-derived Fashion-MNIST AE-SVDD runs except for defense-specific
 # parameters.  In particular, all methods use the calibrated task optimizer,
@@ -49,7 +59,7 @@ BASE_OVERRIDES: dict[str, Any] = {
     "round_diagnostics": False,
     "dirichlet_alpha": 1.0,
     "hf_datasets_offline": True,
-    "mixed_attack_types": "lf,bd,gn",
+    "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
     "device": "cuda",
 }
 

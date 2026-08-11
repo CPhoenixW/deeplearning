@@ -22,6 +22,6 @@
     "data_root": "data",
     "dirichlet_alpha": 1.0,
     "dirichlet_noniid_beta": null,
-    "mixed_attack_types": "lf,bd,gn"
+    "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum"
   }
 }

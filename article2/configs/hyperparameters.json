@@ -129,8 +129,19 @@
     },
     "lie": {
       "common": {
-        "lie_s": null,
         "lie_z_override": null
+      },
+      "defenses": {}
+    },
+    "minmax": {
+      "common": {
+        "distance_attack_deviation": "std"
+      },
+      "defenses": {}
+    },
+    "minsum": {
+      "common": {
+        "distance_attack_deviation": "std"
       },
       "defenses": {}
     }

@@ -13,11 +13,11 @@ from tools.generate_primary_matrix import (
 from tools.run_stage0_smoke import CASES, DEFENSES as STAGE0_DEFENSES, build_jobs
 
 
-def test_primary_matrix_has_624_jobs_and_ag_news_restriction(tmp_path) -> None:
+def test_primary_matrix_has_816_jobs_and_ag_news_restriction(tmp_path) -> None:
     jobs = write_matrix(tmp_path / "primary", rounds=12)
 
-    assert len(jobs) == 624
-    assert len({job.config_path for job in jobs}) == 624
+    assert len(jobs) == 816
+    assert len({job.config_path for job in jobs}) == 816
     assert {job.seed for job in jobs} == set(SEEDS)
     assert {job.defense for job in jobs} == set(DEFENSES)
     assert {job.attack for job in jobs if job.task == "ag_news"} == set(AG_NEWS_ATTACKS)
@@ -30,7 +30,8 @@ def test_primary_matrix_has_624_jobs_and_ag_news_restriction(tmp_path) -> None:
     assert overrides["phase1_score_mode"] == "recon"
     assert overrides["phase2_score_mode"] == "svdd"
     assert overrides["alpha"] == 0.5
-    assert overrides["lie_z_override"] == 0.524
+    assert "lie_z_override" not in overrides
+    assert overrides["mixed_attack_types"] == "lf,bd,gn,sf,lie,minmax,minsum"
     assert overrides["total_rounds"] == 12
 
 

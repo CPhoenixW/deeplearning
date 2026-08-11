@@ -14,7 +14,6 @@
     "phase1_score_mode": "recon",
     "phase2_score_mode": "svdd",
     "alpha": 0.5,
-    "lie_z_override": 0.524,
     "device": "cuda"
   }
 }

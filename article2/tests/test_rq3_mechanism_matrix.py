@@ -43,7 +43,7 @@ def test_rq3_matrix_has_explicit_mechanism_endpoints(tmp_path: Path) -> None:
     assert by_mechanism["full"]["fed_config_overrides"]["phase1_rounds"] == 15
     assert by_mechanism["full"]["fed_config_overrides"]["phase2_score_mode"] == "svdd"
     assert by_mechanism["full"]["fed_config_overrides"]["alpha"] == 0.5
-    assert by_mechanism["full"]["fed_config_overrides"]["lie_z_override"] == 0.524
+    assert "lie_z_override" not in by_mechanism["full"]["fed_config_overrides"]
     assert all(payload["fed_config_overrides"]["num_malicious"] == 0 for payload in payloads if payload["attacks"] == "none")
 
 

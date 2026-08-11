@@ -65,7 +65,7 @@ def main() -> int:
     parser.add_argument("--worker-sequence", default="12,8,4,2,1")
     parser.add_argument("--task", default="fashion_mnist")
     parser.add_argument("--mechanisms", default="fedavg,p1_only,p2_only,full")
-    parser.add_argument("--attacks", default="gn,lie,bd,mix")
+    parser.add_argument("--attacks", default="gn,lie,minmax,minsum,bd,mix")
     parser.add_argument("--malicious-ratios", default="0.1,0.2,0.3,0.4")
     parser.add_argument("--seeds", default="42")
     parser.add_argument("--rounds", type=int, default=100)

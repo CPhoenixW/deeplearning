@@ -43,11 +43,12 @@ class FedConfig:
     trimmed_mean_num_byzantine: int | None = None
     krum_num_byzantine: int | None = None
     multi_krum_num_selected: int | None = None
-    # --- Attack type (short IDs: none, gn, lf, sf, bd, lie, mix; aliases accepted) ---
+    # --- Attack type (short IDs: none, gn, lf, sf, bd, lie, minmax, minsum, mix; aliases accepted) ---
     attack_type: str = "bd"
     # Comma-separated attack IDs assigned deterministically across malicious
-    # clients for the mixed-attack experiment (e.g. ``lf,bd,gn,lie``).
-    mixed_attack_types: str = "lf,bd,gn"
+    # clients for the mixed-attack experiment (e.g.
+    # ``lf,bd,gn,sf,lie,minmax,minsum``).
+    mixed_attack_types: str = "lf,bd,gn,sf,lie,minmax,minsum"
 
     # --- Client training ---
     client_lr: float = 0.1
@@ -82,12 +83,14 @@ class FedConfig:
     # upload = μ + scale * σ * ε, ε~N(0,1) i.i.d. (moment-matched per layer, scale with gaussian_sigma).
     gaussian_sigma: float = 0.3
     sign_flip_scale: float = 1.0
-    # LIE/ALIE attack params:
-    # malicious update delta = mu + z * sigma, where mu/sigma are estimated from
-    # benign-client deltas in the current round. z defaults to z_max satisfying
-    # Phi(z) < (N - M - s) / (N - M), with N total clients, M malicious clients.
-    lie_s: int | None = None
+    # LIE/ALIE attack params.  The default follows Baruch et al. exactly:
+    # s=floor(N/2)+1-M; z=Phi^-1((N-M-s)/(N-M)).  An explicit override is
+    # retained only for controlled attack-strength sensitivity studies.
     lie_z_override: float | None = None
+    # Min-Max / Min-Sum perturbation vector from Shejwalkar & Houmansadr:
+    # ``std`` is the reference-code default; ``sign`` and ``unit_vec`` are
+    # retained as the paper's alternative constructions.
+    distance_attack_deviation: str = "std"
 
     # --- Backdoor attack params ---
     backdoor_target_label: int = 0
@@ -266,6 +269,15 @@ ATTACK_ALIASES: dict[str, str] = {
     "sign_flipping": "sf",
     "backdoor": "bd",
     "lie_attack": "lie",
+    "alie": "lie",
+    "minmax": "minmax",
+    "min_max": "minmax",
+    "min-max": "minmax",
+    "minmax_attack": "minmax",
+    "minsum": "minsum",
+    "min_sum": "minsum",
+    "min-sum": "minsum",
+    "minsum_attack": "minsum",
 }
 
 DEFENSE_ALIASES: dict[str, str] = {
@@ -350,7 +362,7 @@ def apply_fed_config_overrides(
     if pending_malicious is not None:
         config.num_benign = int(config.num_clients) - int(pending_malicious)
     if "mixed_attack_types" in values and values["mixed_attack_types"] is None:
-        config.mixed_attack_types = "lf,bd,gn"
+        config.mixed_attack_types = "lf,bd,gn,sf,lie,minmax,minsum"
     return config
 
 

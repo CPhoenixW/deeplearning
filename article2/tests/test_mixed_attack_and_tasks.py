@@ -12,6 +12,8 @@ from src.config import load_hyperparameter_table, resolve_hyperparameters
 def test_mixed_attack_assignment_is_deterministic():
     cfg = FedConfig(num_clients=10, num_benign=6, mixed_attack_types="lf,bd,gn,lie")
     assert normalize_attack_name("hybrid") == "mix"
+    assert normalize_attack_name("min-max") == "minmax"
+    assert normalize_attack_name("min_sum") == "minsum"
     assert [mixed_attack_for_client(cfg, cid) for cid in range(6, 10)] == ["lf", "bd", "gn", "lie"]
     assert "mix" in ATTACK_REGISTRY
     assert all(

@@ -20,7 +20,7 @@ from typing import Any, Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MECHANISMS = ("fedavg", "p1_only", "p2_only", "full")
-DEFAULT_ATTACKS = ("gn", "lie", "bd", "mix")
+DEFAULT_ATTACKS = ("gn", "lie", "minmax", "minsum", "bd", "mix")
 DEFAULT_RATIOS = (0.10, 0.20, 0.30, 0.40)
 DEFAULT_SEEDS = (42,)
 
@@ -42,8 +42,7 @@ BASE_OVERRIDES: dict[str, Any] = {
     "round_diagnostics": False,
     "dirichlet_alpha": 1.0,
     "hf_datasets_offline": True,
-    "mixed_attack_types": "lf,bd,gn",
-    "lie_z_override": 0.524,
+    "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
     "latent_dim": 64,
     "ae_lr": 0.001,
     "ae_weight_decay": 1e-6,
@@ -176,7 +175,7 @@ def _write_config(
             "seed": int(seed),
             "total_rounds": int(rounds),
             "num_malicious": int(ratio_id),
-            "mixed_attack_types": "lf,bd,gn",
+            "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
         }
     )
     overrides.update({key: value for key, value in _mechanism_overrides(mechanism, rounds).items() if key != "defense"})

@@ -2,9 +2,17 @@
 
 from .backdoor import BackdoorAttack, evaluate_backdoor_asr
 from .base import MaliciousClient
+from .distance import (
+    MinMaxAttack,
+    MinSumAttack,
+    apply_minmax_round,
+    apply_minsum_round,
+    rewrite_minmax_uploads,
+    rewrite_minsum_uploads,
+)
 from .gaussian import GaussianNoiseAttack
 from .label_flipping import LabelFlippingAttack
-from .lie import LieAttack, apply_lie_round, rewrite_lie_uploads
+from .lie import LieAttack, apply_lie_round, lie_parameters, rewrite_lie_uploads
 from .mixed import (
     MixedAttack,
     apply_mixed_round,
@@ -38,9 +46,13 @@ __all__ = [
     "LabelFlippingAttack",
     "LieAttack",
     "MaliciousClient",
+    "MinMaxAttack",
+    "MinSumAttack",
     "MixedAttack",
     "SignFlippingAttack",
     "apply_lie_round",
+    "apply_minmax_round",
+    "apply_minsum_round",
     "apply_mixed_round",
     "apply_round_attack",
     "attack_metadata",
@@ -51,6 +63,9 @@ __all__ = [
     "mixed_attack_for_client",
     "mixed_attack_ids",
     "mixed_attack_metadata",
+    "lie_parameters",
     "rewrite_lie_uploads",
+    "rewrite_minmax_uploads",
+    "rewrite_minsum_uploads",
     "validate_attack_config",
 ]

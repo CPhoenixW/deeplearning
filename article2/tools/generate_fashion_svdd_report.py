@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-ATTACK_ORDER = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
+ATTACK_ORDER = ("none", "gn", "lf", "sf", "bd", "lie", "minmax", "minsum", "mix")
 MODE_ORDER = ("recon", "combined", "svdd", "legacy")
 ERROR_MARKERS = (
     "Traceback",
@@ -97,8 +97,8 @@ ACTIVE_CONFIG_KEYS = (
     "backdoor_model_replace_scale",
     "gaussian_sigma",
     "sign_flip_scale",
-    "lie_s",
     "lie_z_override",
+    "distance_attack_deviation",
     "mixed_attack_types",
 )
 
@@ -686,7 +686,11 @@ def _report_markdown(
                     ["恶意参与方", "10, 20, 30, 40 / 100", "每轮固定参与的恶意客户端数"],
                     ["score_mode / alpha", "recon / 0.0；combined / 0.5；svdd / 1.0", "两阶段均使用该筛选分数"],
                     ["seed", ", ".join(map(str, seeds)), "独立重复"],
-                    ["攻击", "none, gn, lf, sf, bd, lie, mix", "mix=lf,bd,gn"],
+                    [
+                        "攻击",
+                        "none, gn, lf, sf, bd, lie, minmax, minsum, mix",
+                        "mix=lf,bd,gn,sf,lie,minmax,minsum",
+                    ],
                     ["总轮数", str(next(iter({int(record["total_rounds"]) for record in records}), "—")), "每个独立任务"],
                 ],
             ),

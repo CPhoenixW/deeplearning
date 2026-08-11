@@ -107,11 +107,19 @@ class AttackStage:
     name: str = "attack"
 
     def run(self, context: PipelineContext) -> PipelineContext:
+        if context.defense is None:
+            raise RuntimeError("Defense must be initialized before coordinated attacks")
+        # Paper-defined omniscient attacks operate on trainable gradients, not
+        # BatchNorm running statistics or other state-dict buffers.
+        parameter_names = tuple(
+            name for name, _parameter in context.defense.global_model.named_parameters()
+        )
         self.apply(
             context.config,
             context.defense_name,
             context.global_state,
             context.client_states,
+            parameter_names,
         )
         return context
 

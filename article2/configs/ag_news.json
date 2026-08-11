@@ -1,6 +1,6 @@
 {
   "task": "ag_news",
-  "attacks": "gn,sf,bd,lf,lie",
+  "attacks": "gn,sf,bd,lf,lie,minmax,minsum",
   "defenses": "avg,tm,mk,svdd,lasa",
   "log_dir": "log/ag_news",
   "fed_config_file": "configs/federated.json",

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the confirmed 624-job Article2 primary experiment matrix.
+"""Generate the confirmed 816-job Article2 primary experiment matrix.
 
 This command only writes independent JSON configs and a manifest.  It does not
 launch training, so the generated matrix can be reviewed before scheduling.
@@ -16,8 +16,18 @@ from typing import Any, Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TASKS = ("mnist", "fashion_mnist", "cifar10")
-IMAGE_ATTACKS = ("none", "lf", "gn", "sf", "lie", "bd", "mix")
-AG_NEWS_ATTACKS = ("none", "lf", "gn", "sf", "lie")
+IMAGE_ATTACKS = (
+    "none",
+    "lf",
+    "gn",
+    "sf",
+    "lie",
+    "minmax",
+    "minsum",
+    "bd",
+    "mix",
+)
+AG_NEWS_ATTACKS = ("none", "lf", "gn", "sf", "lie", "minmax", "minsum")
 DEFENSES = ("avg", "tm", "mk", "lasa", "seca", "bnguard", "dmc", "svdd")
 SEEDS = (42, 43, 44)
 
@@ -34,8 +44,7 @@ BASE_OVERRIDES: dict[str, Any] = {
     "phase1_score_mode": "recon",
     "phase2_score_mode": "svdd",
     "alpha": 0.5,
-    "lie_z_override": 0.524,
-    "mixed_attack_types": "lf,bd,gn",
+    "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
     "param_descriptor_dim": 4096,
     "param_descriptor_device": "cuda",
     "device": "cuda",
@@ -108,14 +117,14 @@ def write_matrix(root: Path, *, rounds: int = 300, force: bool = False) -> list[
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-root", type=Path, default=Path("log/article2_primary_624"))
+    parser.add_argument("--output-root", type=Path, default=Path("log/article2_primary_816"))
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
     if args.rounds < 1:
         parser.error("--rounds must be positive")
     jobs = write_matrix(args.output_root, rounds=args.rounds, force=args.force)
-    expected = (3 * 7 + 5) * 8 * 3
+    expected = (3 * 9 + 7) * 8 * 3
     print(f"jobs={len(jobs)} expected={expected} rounds={args.rounds}")
     if len(jobs) != expected:
         raise RuntimeError(f"Primary matrix cardinality mismatch: {len(jobs)} != {expected}")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Type
+from typing import Any, Callable, Dict, List, Sequence, Type
 
 import torch
 from torch import nn
@@ -12,9 +12,17 @@ from torch.utils.data import DataLoader
 from ..clients import BaseClient, BenignClient, ModelFactory
 from ..config import FedConfig, normalize_attack_name
 from .backdoor import BackdoorAttack, evaluate_backdoor_attack
+from .distance import (
+    MinMaxAttack,
+    MinSumAttack,
+    apply_minmax_round,
+    apply_minsum_round,
+    distance_attack_metadata,
+    validate_distance_attack_config,
+)
 from .gaussian import GaussianNoiseAttack
 from .label_flipping import LabelFlippingAttack
-from .lie import LieAttack, apply_lie_round
+from .lie import LieAttack, apply_lie_round, lie_attack_metadata, validate_lie_config
 from .mixed import (
     MixedAttack,
     apply_mixed_round,
@@ -27,7 +35,7 @@ from .sign_flipping import SignFlippingAttack
 
 AttackClientType = Type[BaseClient]
 RoundAttackHook = Callable[
-    [FedConfig, str, Dict[str, Tensor], List[Dict[str, Tensor]]],
+    [FedConfig, str, Dict[str, Tensor], List[Dict[str, Tensor]], Sequence[str] | None],
     None,
 ]
 AttackEvaluator = Callable[
@@ -45,11 +53,15 @@ ATTACK_REGISTRY: Dict[str, AttackClientType] = {
     "sf": SignFlippingAttack,
     "bd": BackdoorAttack,
     "lie": LieAttack,
+    "minmax": MinMaxAttack,
+    "minsum": MinSumAttack,
     "mix": MixedAttack,
 }
 
 ROUND_ATTACK_HOOKS: Dict[str, RoundAttackHook] = {
     "lie": apply_lie_round,
+    "minmax": apply_minmax_round,
+    "minsum": apply_minsum_round,
     "mix": apply_mixed_round,
 }
 
@@ -59,10 +71,16 @@ ATTACK_EVALUATORS: Dict[str, AttackEvaluator] = {
 }
 
 ATTACK_METADATA_BUILDERS: Dict[str, AttackMetadataBuilder] = {
+    "lie": lie_attack_metadata,
+    "minmax": lambda config: distance_attack_metadata(config, "minmax"),
+    "minsum": lambda config: distance_attack_metadata(config, "minsum"),
     "mix": mixed_attack_metadata,
 }
 
 ATTACK_CONFIG_VALIDATORS: Dict[str, AttackConfigValidator] = {
+    "lie": validate_lie_config,
+    "minmax": validate_distance_attack_config,
+    "minsum": validate_distance_attack_config,
     "mix": mixed_attack_ids,
 }
 
@@ -99,6 +117,7 @@ def apply_round_attack(
     defense_name: str,
     global_state: Dict[str, Tensor],
     client_states: List[Dict[str, Tensor]],
+    parameter_names: Sequence[str] | None = None,
 ) -> None:
     """Run the optional coordinated hook for the configured attack."""
 
@@ -106,7 +125,7 @@ def apply_round_attack(
     validate_attack_config(attack_id, config)
     hook = ROUND_ATTACK_HOOKS.get(attack_id)
     if hook is not None:
-        hook(config, defense_name, global_state, client_states)
+        hook(config, defense_name, global_state, client_states, parameter_names)
 
 
 def evaluate_attack(

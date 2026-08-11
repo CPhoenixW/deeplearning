@@ -1,125 +1,162 @@
-"""LIE/ALIE client placeholder and coordinated round-level rewrite."""
+"""Paper-faithful LIE / ALIE coordinated model-poisoning attack.
+
+Reference: Baruch et al., *A Little Is Enough: Circumventing Defenses for
+Distributed Learning* (NeurIPS 2019).  The source formulation is over
+gradients.  This project sends model deltas, so ``mu + z * sigma`` below is the
+sign-equivalent state-delta form of the reference gradient construction
+``mu - z * sigma``.
+"""
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence
+import math
+from typing import Dict, List, Sequence
 
 import torch
 from torch import Tensor
 
 from ..config import FedConfig
-from .base import MaliciousClient
+from .coordinated import (
+    CoordinatedModelPoisoningAttack,
+    StateDict,
+    attack_compute_device,
+    attack_parameter_names,
+    benign_states,
+    empty_crafted_delta,
+    iter_benign_delta_chunks,
+    rewrite_crafted_uploads,
+)
 
 
-class LieAttack(MaliciousClient):
-    """Skip local SGD when the coordinated round hook will replace the upload."""
-
-    def local_step(
-        self,
-        global_state_dict: Dict[str, Tensor],
-        reference_state_dict: Optional[Dict[str, Tensor]] = None,
-    ) -> Dict[str, Tensor]:
-        if not self.config.skip_redundant_attack_training:
-            return super().local_step(global_state_dict, reference_state_dict)
-        return reference_state_dict or global_state_dict
+class LieAttack(CoordinatedModelPoisoningAttack):
+    """LIE client shell; a coordinated hook replaces its final upload."""
 
 
-def _default_lie_s(config: FedConfig, defense_name: str) -> int:
-    if defense_name == "mk":
-        return int(
-            config.krum_num_byzantine
-            if config.krum_num_byzantine is not None
-            else max(0, config.num_clients - config.num_benign)
+def lie_parameters(
+    config: FedConfig,
+    *,
+    attacker_count: int | None = None,
+) -> tuple[int, float]:
+    """Return the paper's ``(s, z_max)`` for the configured population.
+
+    The original implementation defines
+
+    ``s = floor(N / 2) + 1 - M`` and
+    ``z_max = Phi^-1((N - M - s) / (N - M))``.
+
+    ``lie_z_override`` remains an explicit sensitivity-control escape hatch,
+    but all default and generated experiment configurations leave it unset so
+    that changing client or attacker counts automatically changes ``z_max``.
+    """
+
+    total = int(config.num_clients)
+    attackers = (
+        int(config.num_clients) - int(config.num_benign)
+        if attacker_count is None
+        else int(attacker_count)
+    )
+    if total < 3:
+        raise ValueError("LIE requires at least three total clients.")
+    if attackers < 1 or attackers >= total:
+        raise ValueError("LIE requires 1 <= malicious clients < num_clients.")
+
+    s = total // 2 + 1 - attackers
+    benign_count = total - attackers
+    cdf_value = float(benign_count - s) / float(benign_count)
+    if config.lie_z_override is not None:
+        z = float(config.lie_z_override)
+        if not math.isfinite(z):
+            raise ValueError("lie_z_override must be finite when provided.")
+        return s, z
+    if not 0.0 < cdf_value < 1.0:
+        raise ValueError(
+            "The LIE paper formula produced a non-finite quantile; choose a "
+            "valid client/attacker ratio or set lie_z_override explicitly."
         )
-    if defense_name == "tm":
-        if config.trimmed_mean_num_byzantine is not None:
-            return int(config.trimmed_mean_num_byzantine)
-        return max(0, config.num_clients - config.num_benign)
-    return 0
+    normal = torch.distributions.Normal(
+        torch.tensor(0.0, dtype=torch.float64),
+        torch.tensor(1.0, dtype=torch.float64),
+    )
+    z = float(normal.icdf(torch.tensor(cdf_value, dtype=torch.float64)).item())
+    if not math.isfinite(z):
+        raise ValueError("LIE z_max is non-finite.")
+    return s, z
+
+
+def validate_lie_config(config: FedConfig) -> None:
+    """Validate the paper formula before local clients begin training."""
+
+    lie_parameters(config)
+
+
+def lie_attack_metadata(config: FedConfig) -> Dict[str, object]:
+    """Record the derived paper parameters in every structured result."""
+
+    s, z = lie_parameters(config)
+    return {
+        "lie_variant": "ALIE (Baruch et al., NeurIPS 2019)",
+        "lie_coordinate_space": "model_delta",
+        "lie_std_correction": 1,
+        "lie_s": int(s),
+        "lie_z": float(z),
+        "lie_z_override_active": config.lie_z_override is not None,
+    }
 
 
 def rewrite_lie_uploads(
     config: FedConfig,
     defense_name: str,
-    global_state: Dict[str, Tensor],
-    client_states: List[Dict[str, Tensor]],
+    global_state: StateDict,
+    client_states: List[StateDict],
     malicious_client_ids: Sequence[int],
+    parameter_names: Sequence[str] | None = None,
 ) -> None:
-    """Rewrite selected uploads as ``mu + z * sigma`` benign-update estimates."""
+    """Replace selected uploads with the original LIE statistical update.
 
-    client_ids = [int(client_id) for client_id in malicious_client_ids]
+    ``defense_name`` remains in the public hook signature for compatibility;
+    unlike the old implementation, it does not alter the attacker strength.
+    A fixed attack must have the same definition against every defense.
+    """
+
+    del defense_name
+    client_ids = tuple(int(client_id) for client_id in malicious_client_ids)
     if not client_ids:
         return
-    benign_count = int(config.num_benign)
-    if benign_count < 1:
-        raise ValueError("LIE requires at least one benign client update")
+    _s, z = lie_parameters(config)
+    names = attack_parameter_names(global_state, parameter_names)
+    states = benign_states(config, client_states)
+    device = attack_compute_device(config)
+    crafted_delta = empty_crafted_delta(global_state, names)
 
-    s = (
-        int(config.lie_s)
-        if config.lie_s is not None
-        else _default_lie_s(config, defense_name)
-    )
-    s = max(0, min(s, benign_count - 1))
-    ratio = float(benign_count - s) / float(benign_count)
-    ratio = min(max(ratio, 1e-6), 1.0 - 1e-6)
-    if config.lie_z_override is not None:
-        z = float(config.lie_z_override)
-    else:
-        z = float(
-            torch.distributions.Normal(0.0, 1.0)
-            .icdf(torch.tensor(ratio))
-            .item()
-        )
-
-    benign_states = client_states[:benign_count]
-    # Client states are kept on CPU between stages.  The per-layer LIE
-    # statistics are large enough to dominate the remaining confirmation run,
-    # so use the aggregation device when CUDA aggregation is enabled and move
-    # only the compact crafted result back to CPU.
-    compute_device = (
-        torch.device("cuda")
-        if bool(getattr(config, "cuda_aggregation", False))
-        and torch.cuda.is_available()
-        else torch.device("cpu")
-    )
-    crafted_delta: Dict[str, Tensor] = {}
-    for key, global_value in global_state.items():
-        global_cpu = global_value.detach().cpu()
-        if not global_cpu.is_floating_point():
-            continue
-        global_work = global_cpu.float().to(compute_device)
-        deltas = torch.stack(
-            [
-                state[key].detach().to(compute_device, non_blocking=True).float()
-                - global_work
-                for state in benign_states
-            ],
-            dim=0,
-        )
+    for name, start, end, deltas in iter_benign_delta_chunks(
+        global_state,
+        states,
+        names,
+        device=device,
+    ):
         mean = deltas.mean(dim=0)
-        std = deltas.std(dim=0, unbiased=False)
-        crafted_delta[key] = (mean + z * std).detach().cpu()
+        # ``torch.std`` in the reference implementation uses Bessel's
+        # correction (``unbiased=True``); preserve that detail exactly.
+        std = deltas.std(dim=0, unbiased=True)
+        crafted_delta[name].reshape(-1)[start:end] = (
+            mean + float(z) * std
+        ).detach().cpu()
 
-    for client_id in client_ids:
-        if not 0 <= client_id < len(client_states):
-            raise IndexError(f"LIE client id {client_id} is out of range")
-        source = client_states[client_id]
-        rewritten: Dict[str, Tensor] = {}
-        for key, global_value in global_state.items():
-            global_cpu = global_value.detach().cpu()
-            if global_cpu.is_floating_point():
-                output = global_cpu.float() + crafted_delta[key]
-                rewritten[key] = output.to(dtype=global_cpu.dtype).clone()
-            else:
-                rewritten[key] = source[key].detach().cpu().clone()
-        client_states[client_id] = rewritten
+    rewrite_crafted_uploads(
+        global_state,
+        client_states,
+        client_ids,
+        names,
+        crafted_delta,
+    )
 
 
 def apply_lie_round(
     config: FedConfig,
     defense_name: str,
-    global_state: Dict[str, Tensor],
-    client_states: List[Dict[str, Tensor]],
+    global_state: StateDict,
+    client_states: List[StateDict],
+    parameter_names: Sequence[str] | None = None,
 ) -> None:
     rewrite_lie_uploads(
         config,
@@ -127,7 +164,15 @@ def apply_lie_round(
         global_state,
         client_states,
         range(config.num_benign, config.num_clients),
+        parameter_names,
     )
 
 
-__all__ = ["LieAttack", "apply_lie_round", "rewrite_lie_uploads"]
+__all__ = [
+    "LieAttack",
+    "apply_lie_round",
+    "lie_attack_metadata",
+    "lie_parameters",
+    "rewrite_lie_uploads",
+    "validate_lie_config",
+]

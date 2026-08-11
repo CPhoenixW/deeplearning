@@ -70,10 +70,10 @@ client optimizer settings are then shared by FedAvg, every baseline, and AE-SVDD
 | AG News | 0.10 | 0 |
 
 The canonical primary generator (`tools/generate_primary_matrix.py`) produces
-624 jobs: (3\times7\times8\times3=504) image jobs and
-(5\times8\times3=120) AG News jobs. Image attacks are
-`none, lf, gn, sf, lie, bd, mix`; AG News uses
-`none, lf, gn, sf, lie` because it has no image trigger. The separate RQ3
+816 jobs: (3\times9\times8\times3=648) image jobs and
+(7\times8\times3=168) AG News jobs. Image attacks are
+`none, lf, gn, sf, lie, minmax, minsum, bd, mix`; AG News uses
+`none, lf, gn, sf, lie, minmax, minsum` because it has no image trigger. The separate RQ3
 mechanism matrix uses the same data protocol but varies the malicious ratio and
 mechanism explicitly.
 
@@ -88,14 +88,17 @@ Unless a sensitivity experiment says otherwise, the following values are fixed.
 | LF | Data poisoning | Symmetric label map (y' = C-1-y) | Fixed by the task label space |
 | GN | Model poisoning | Replace each floating tensor by a moment-matched Gaussian draw | `gaussian_sigma = 0.3` |
 | SF | Model/update poisoning | Upload (W_g - s(W_l-W_g)) | `sign_flip_scale = 1.0` |
-| LIE | Statistical model poisoning | Craft Δ as μ + zσ from benign updates | `lie_z_override = 0.524` in the primary matrix |
+| LIE / ALIE | Statistical model poisoning | Craft Δ as μ + zσ from benign updates (the model-delta equivalent of the original gradient-space form) | Automatically compute \(s=\lfloor K/2\rfloor+1-M\), \(z=\Phi^{-1}((K-M-s)/(K-M))\); at K=100, M=30, z≈0.5244 |
+| Min-Max | Omniscient model poisoning | Craft Δ=μ+λδ while constraining its largest benign-pair distance | δ is sample standard deviation; λ uses the source binary search |
+| Min-Sum | Omniscient model poisoning | Craft Δ=μ+λδ while constraining its summed benign distance | δ is sample standard deviation; λ uses the source binary search |
 | BD | Data + model replacement | Lower-right square trigger, target label, then amplify update | target 0; poison 0.6; trigger 5; value 1.0; replacement 3.0 |
-| Mix (M1) | Simultaneous mixed attack | Deterministic round-robin assignment across malicious clients | `lf,bd,gn` |
+| Mix (M1) | Simultaneous mixed attack | Deterministic round-robin assignment across malicious clients | `lf,bd,gn,sf,lie,minmax,minsum` |
 
 Mix is simultaneous: different malicious clients apply different attacks in the
 same round. It is not a random choice of one attack per round. The assignment
-map is written to each result file, allowing per-family recall. Supplementary
-mixed combinations are M2=`lf,sf,lie` and M3=`lf,bd,gn,lie`.
+map is written to each result file, allowing per-family recall. Every coordinated
+component (LIE, Min-Max, and Min-Sum) is constructed from the same benign-update
+view and only overwrites the malicious clients assigned to that component.
 
 AG News uses target-label poisoning for BD-like behavior if explicitly studied,
 but the primary AG News matrix excludes `bd` and `mix`.
@@ -106,7 +109,7 @@ All methods receive the same client states, data partitions, round budget, and
 information boundary. No baseline is given the malicious identity or the clean
 validation labels unless its protocol explicitly uses the shared validation set.
 
-| Method | Code ID | Core operation | Primary 624-job matrix |
+| Method | Code ID | Core operation | Primary 816-job matrix |
 | --- | --- | --- | --- |
 | FedAvg | `avg` | Uniform aggregation of all uploads | Yes |
 | Trimmed Mean | `tm` | Coordinate-wise trimmed aggregation | Yes |
@@ -121,7 +124,7 @@ validation labels unless its protocol explicitly uses the shared validation set.
 | FLGMM / FLANDERS | `flgmm` / `flanders` | Registered comparison implementations | Supplementary only when run under the same protocol |
 
 The primary comparison table must not silently mix supplementary runs with the
-624-job matrix. A supplementary defense is included only when its JSON contains
+816-job matrix. A supplementary defense is included only when its JSON contains
 the same task, seed, rounds, client population, attack, and validation protocol.
 
 ### 4.1.5 Evaluation Metrics
@@ -143,7 +146,7 @@ continuous selection scores additionally yield AUROC and AUPRC. AUC is `N/A`
 when a slice contains only one class.
 
 For mixed attacks, RR is reported both overall and separately for LF, BD, GN, SF,
-and LIE according to the saved client-to-attack map. Overall RR must not hide a
+LIE, Min-Max, and Min-Sum according to the saved client-to-attack map. Overall RR must not hide a
 failure on one attack family.
 
 #### Aggregation and stability
@@ -237,7 +240,7 @@ decision-based metrics.
 
 ### 4.3.1 Individual Attacks
 
-Run LF, GN, SF, LIE, and BD separately with the primary 30% malicious-client
+Run LF, GN, SF, LIE, Min-Max, Min-Sum, and BD separately with the primary 30% malicious-client
 setting. For each attack, show the score distribution over benign and malicious
 clients, accepted fraction, and per-round detection metrics. BD rows include ASR;
 AG News rows do not include image ASR.
@@ -256,9 +259,9 @@ overall detection and attack-family recall, not just an average over attack type
 
 **Table 3. Mixed-attack detection and utility.**
 
-| Dataset | Split | Mix | Defense | DAR | DPR | Overall RR | LF RR | BD RR | GN RR | SF RR | LIE RR | FPR | TACC | ASR |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Dataset | Split | Mix | Defense | DAR | DPR | Overall RR | LF RR | BD RR | GN RR | SF RR | LIE RR | Min-Max RR | Min-Sum RR | FPR | TACC | ASR |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
 
 ## 4.4 Ablation Study
 
@@ -278,7 +281,7 @@ FedAvg aggregation operation.
 | P2-only | Skipped (`phase1_rounds=0`) | All rounds ranked by (d_i) | α(L_{SVDD})+(1-α)(L_{recon}) | Early-center and no-warmup behavior |
 | Full | First 15 rounds ranked by (r_i) | Remaining rounds ranked by (d_i) | Phase-specific objectives above | Complementarity of the complete schedule |
 
-Use the RQ3 runner with LF, GN, SF, LIE, BD, and M1, ratios 10%, 20%, 30%, and
+Use the RQ3 runner with LF, GN, SF, LIE, Min-Max, Min-Sum, BD, and M1, ratios 10%, 20%, 30%, and
 40%, plus a 0% clean control, and seeds 42--44. The default RQ3 runner uses 100 rounds for the
 mechanism screen; a selected configuration is confirmed for 300 rounds. Claim
 complementarity only when Full improves the same attack/ratio/seed comparison,
@@ -300,7 +303,7 @@ three supported Phase-2 scores:
 - `combined`: average the rank-normalized (r_i) and (d_i).
 
 This is a score ablation, not a loss ablation. The loss remains the same for all
-three rows. Use 100-round screening over GN, SF, LIE, BD, and M1, then repeat the
+three rows. Use 100-round screening over GN, SF, LIE, Min-Max, Min-Sum, BD, and M1, then repeat the
 best mode on the 300-round primary protocol.
 
 **Table 5. Phase-2 score ablation.**
@@ -438,6 +441,7 @@ fixed. The following grid gives interpretable weak-to-strong points:
 | GN | `gaussian_sigma` | 0.1, 0.3, 0.5, 1.0 |
 | SF | `sign_flip_scale` | 0.25, 0.5, 1.0, 2.0 |
 | LIE | `lie_z_override` | 0.2, 0.524, 0.8, 1.0 |
+| Min-Max / Min-Sum | `distance_attack_deviation` | `std` (primary), `sign`, `unit_vec` |
 | BD | `backdoor_poison_ratio` | 0.2, 0.4, 0.6, 0.8 |
 | BD | `backdoor_model_replace_scale` | 1.0, 2.0, 3.0, 5.0 |
 
