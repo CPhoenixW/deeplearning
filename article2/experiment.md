@@ -1,206 +1,476 @@
-# 实验
+# 4. Experiments
 
-本文围绕以下十个研究问题评价两阶段 AE-SVDD 联邦恶意参与方检测方法。
+This section evaluates the two-stage AE-SVDD defense under the protocol described
+in the supplied experiment document. The design separates three objects that are
+often conflated in federated-learning defenses: the client-selection score, the
+AE/SVDD training objective, and the final aggregation weights. No numerical result
+is filled in here unless it is produced by a completed JSON result file; all tables
+below are reporting templates for the analysis scripts.
 
-1. **RQ1：全局模型效用。** 在不同数据模态和攻击类型下，本文方法能否维持全局模型的干净任务性能并抑制攻击效果？
-2. **RQ2：恶意客户端检测。** 面对单一攻击以及多种恶意客户端共同参与的混合攻击时，本文方法能否准确区分恶意客户端与良性客户端，并同时识别混合环境中的各攻击族？
-3. **RQ3：两阶段机制。** 第一阶段重建误差筛选和第二阶段潜在空间检测与可信聚合分别发挥什么作用，二者是否具有互补性？
-4. **RQ4：恶意比例。** 当恶意客户端比例在良性多数假设内变化时，本文方法的效用和检测能力如何变化？
-5. **RQ5：客户端规模。** 客户端数量从 50 增加到 200 时，本文方法的检测效果、模型效用和执行开销是否稳定？
-6. **RQ6：数据异质性。** 不同程度的 non-IID 是否会使正常 client drift 被误判为恶意行为？
-7. **RQ7：攻击强度。** 从弱攻击到强攻击，检测效果的变化来自防御能力还是攻击本身尚未成功？
-8. **RQ8：动态阈值。** 第二阶段的动态收紧阈值是否优于固定阈值？
-9. **RQ9：特征描述与压缩。** 固定投影维度和全局、分层、统计三种视角如何影响检测信息保留与计算代价之间的权衡？
-10. **RQ10：可信样本分位数。** 中心初始化和第二阶段重建训练使用的可信样本比例如何影响检测边界与模型效用？
+The experiments answer the following questions:
 
-后文实验结果与上述研究问题逐一对应。全局效用、检测能力、核心机制、环境因素和参数影响分别呈现，不把性质不同的实验合并为同一个研究问题。
+- **RQ1:** Does the defense preserve clean global-model utility under different
+  modalities and attacks?
+- **RQ2:** Can it detect individual attacks and identify each attack family in a
+  simultaneous mixed attack?
+- **RQ3:** Are the reconstruction-only, compactness-only, and complete two-stage
+  mechanisms complementary?
+- **RQ4:** How sensitive is the method to its loss coefficient, phase-1 duration,
+  and trusted validation-set size?
+- **RQ5:** How robust is it to attacker ratio, data heterogeneity, client scale,
+  and attack intensity?
+- **RQ6:** What is the computational overhead relative to the baselines?
 
-## 1. 实验设置
+## 4.1 Experimental Setup
 
-### 1.1 数据集与全局模型
+### 4.1.1 Datasets and Models
 
-实验采用 MNIST、Fashion-MNIST、CIFAR-10 和 AG News 四个数据集，以覆盖简单灰度图像、服饰图像、自然图像和文本分类任务。MNIST 使用适配原生 28×28 单通道输入的 LeNet 风格网络，包含两层卷积和三层全连接；Fashion-MNIST 使用通道数和分类头容量更大的两层轻量 CNN，以适应服饰纹理和类别间相似性；二者均不进行为适配深层网络而设置的图像放大。CIFAR-10 使用适配 32×32 彩色图像的 ResNet-18；AG News 使用轻量 Transformer 文本分类器。四个任务均由当前代码中的任务注册表直接选择，不为单个实验临时更换模型结构。
+Four tasks cover native grayscale images, color images, and text. Dataset loaders
+create one fixed, clean server validation subset before client partitioning; those
+samples are not assigned to any client.
 
-MNIST 和 Fashion-MNIST 用于验证基本有效性及稳定性，CIFAR-10 用于检验较深视觉模型下的鲁棒性，AG News 用于检验方法从视觉模型参数更新迁移到文本模型参数更新时的适用性。AE-SVDD 在四个任务上均使用同一固定分层多视角描述器处理全部可训练参数的模型增量，不将 LN 或 BN 参数作为专用输入。不同数据集之间不比较绝对准确率，而比较同一数据集上各防御相对于 FedAvg 的效用保持、检测质量和额外代价。
+| Dataset | Input and classes | Global model in the codebase | Purpose |
+| --- | --- | --- | --- |
+| MNIST | 28 x 28 grayscale, 10 classes | Native-resolution LeNet-style classifier (`LeNetClassifier`) | Basic image classification and attack sanity check |
+| Fashion-MNIST | 28 x 28 grayscale, 10 classes | Lightweight two-convolution CNN (`FashionCNN`) | Fine-grained grayscale classes and stability check |
+| CIFAR-10 | 32 x 32 RGB, 10 classes | CIFAR-adapted ResNet-18 (3 x 3 stem, no initial max-pool) | Deeper visual model and the main robustness task |
+| AG News | Tokenized text, 4 classes | Lightweight Transformer classifier with a BN compatibility head | Cross-modal transfer to a text model |
 
-### 1.2 联邦学习与数据划分
+Absolute accuracy is compared only within a dataset. Cross-dataset conclusions
+use relative accuracy drop, detection quality, and overhead rather than raw TACC.
+For AG News, target-label poisoning has no image trigger; an image-style ASR is
+therefore reported as `N/A`.
 
-主实验采用 100 个客户端，其中 30% 为恶意客户端；全局模型训练 300 轮，每轮所有客户端参与，本地训练 1 个 epoch，batch size 为 64。主实验同时报告 IID 和 Dirichlet α=1.0 两种划分，其中 α=1.0 是主表中必要的轻度 non-IID 环境，IID 用作同条件参照。α=0.5 和 α=0.1 仅在环境边界实验中使用，不能据此宣称本文方法解决了 non-IID 问题。
+### 4.1.2 Federated Learning Settings
 
-每组实验使用随机种子 42、43 和 44。对于相同的数据集、客户端数量、α 和随机种子，不同攻击及防御复用完全相同的客户端数据划分，使比较具有配对性。恶意客户端默认由编号位于末尾的客户端组成，但服务器在训练或聚合过程中不读取恶意身份；该身份仅用于实验结束后的检测指标计算。除环境边界实验外，其余实验固定训练轮数、本地 epoch、batch size、优化器和数据划分，以避免把训练预算差异误当作防御收益。
+The primary protocol is fixed for every defense and attack so that only the
+defense or attack factor changes.
 
-### 1.3 攻击方法
+| Setting | Primary value |
+| --- | --- |
+| Total clients (K) | 100 |
+| Malicious clients | 30 (30%; client IDs are used only for post-hoc scoring) |
+| Participation | All 100 clients each communication round |
+| Communication rounds | 300 |
+| Local epochs / batch size | 1 / 64 |
+| Client optimizer | SGD, momentum 0.9 |
+| Data partition | Dirichlet α = 1.0 in the primary matrix; IID is the clean reference condition |
+| Trusted server validation set | 50 clean training samples, stratified and withheld from clients |
+| Random seeds | 42, 43, and 44 |
+| Runtime | JSON-driven pipeline, CUDA when available, deterministic job-level seed |
 
-实验覆盖模型或梯度级攻击、数据或目标级攻击以及混合攻击。
+Task calibration is performed once on clean FedAvg using only TACC. The selected
+client optimizer settings are then shared by FedAvg, every baseline, and AE-SVDD:
 
-**标签翻转攻击（LF）**将恶意客户端本地样本标签变换为 \(y'=C-1-y\)，用于模拟改变监督信号的数据投毒。
+| Dataset | `client_lr` | `client_weight_decay` |
+| --- | ---: | ---: |
+| MNIST | 0.10 | 1e-4 |
+| Fashion-MNIST | 0.10 | 0 |
+| CIFAR-10 | 0.05 | 1e-4 |
+| AG News | 0.10 | 0 |
 
-**高斯模型投毒（GN）**依据全局模型各参数张量的均值和标准差构造带高斯噪声的上传模型，攻击强度由 `gaussian_sigma` 控制。
+The canonical primary generator (`tools/generate_primary_matrix.py`) produces
+624 jobs: (3\times7\times8\times3=504) image jobs and
+(5\times8\times3=120) AG News jobs. Image attacks are
+`none, lf, gn, sf, lie, bd, mix`; AG News uses
+`none, lf, gn, sf, lie` because it has no image trigger. The separate RQ3
+mechanism matrix uses the same data protocol but varies the malicious ratio and
+mechanism explicitly.
 
-**符号翻转攻击（SF）**在正常本地训练后反转并缩放模型增量，攻击强度由 `sign_flip_scale` 控制。
+### 4.1.3 Attack Settings
 
-**LIE/ALIE 攻击（LIE）**根据客户端上传增量的均值和标准差构造统计伪装更新，攻击强度由 `lie_s` 或 `lie_z_override` 控制。该攻击用于检验异常更新与良性分布较接近时的检测能力。
+The attack implementations are modular client components under `src/attacks`.
+Unless a sensitivity experiment says otherwise, the following values are fixed.
 
-**后门攻击（BD）**在图像任务的部分恶意客户端样本右下角写入固定方形触发器、修改为目标标签，并可通过模型替换因子放大恶意更新；其强度由 `backdoor_poison_ratio`、`backdoor_trigger_size` 和 `backdoor_model_replace_scale` 控制。AG News 当前实现不插入文本触发模式，而执行目标标签投毒，因此仅将其作为目标型数据投毒，并不报告没有对应触发语义的文本 ASR。
+| ID | Attack level | Upload or data transformation | Primary value |
+| --- | --- | --- | --- |
+| None | Control | Ordinary local training | No malicious clients |
+| LF | Data poisoning | Symmetric label map (y' = C-1-y) | Fixed by the task label space |
+| GN | Model poisoning | Replace each floating tensor by a moment-matched Gaussian draw | `gaussian_sigma = 0.3` |
+| SF | Model/update poisoning | Upload (W_g - s(W_l-W_g)) | `sign_flip_scale = 1.0` |
+| LIE | Statistical model poisoning | Craft Δ as μ + zσ from benign updates | `lie_z_override = 0.524` in the primary matrix |
+| BD | Data + model replacement | Lower-right square trigger, target label, then amplify update | target 0; poison 0.6; trigger 5; value 1.0; replacement 3.0 |
+| Mix (M1) | Simultaneous mixed attack | Deterministic round-robin assignment across malicious clients | `lf,bd,gn` |
 
-**混合攻击（Mix）**要求同一轮中的不同恶意客户端分别实施不同攻击，而不是逐轮随机切换一种攻击。主实验采用 M1（LF+BD+GN），并在混合攻击专项实验中增加 M2（LF+SF+LIE）和 M3（LF+BD+GN+LIE）。攻击类型按照恶意客户端编号确定性轮转分配，分配关系随实验结果保存，使每个攻击族的检出率可以单独计算。三种组合均由 `mixed_attack_types` 直接配置。
+Mix is simultaneous: different malicious clients apply different attacks in the
+same round. It is not a random choice of one attack per round. The assignment
+map is written to each result file, allowing per-family recall. Supplementary
+mixed combinations are M2=`lf,sf,lie` and M3=`lf,bd,gn,lie`.
 
-另设无攻击条件（None）作为必要的负对照，用于检查防御是否依靠大量拒绝良性客户端获得表面上的鲁棒性。
+AG News uses target-label poisoning for BD-like behavior if explicitly studied,
+but the primary AG News matrix excludes `bd` and `mix`.
 
-### 1.4 对比方法
+### 4.1.4 Baselines
 
-实验将本文方法与两类基线比较。第一类是无防御 FedAvg，以及经典鲁棒聚合 Trimmed Mean 和 Multi-Krum；第二类是在当前代码场景中已接入统一服务器接口的检测或鲁棒聚合方法，包括 LASA、FedSECA、FL-Defender 和 FedDMC-style 多视角检测器。本文方法记为 AE-SVDD。各方法分别由 `avg`、`tm`、`mk`、`lasa`、`seca`、`fld`、`dmc` 和 `svdd` 选择。
+All methods receive the same client states, data partitions, round budget, and
+information boundary. No baseline is given the malicious identity or the clean
+validation labels unless its protocol explicitly uses the shared validation set.
 
-对比实现应保持原文的核心判别理念：Trimmed Mean 使用坐标级截断统计，Multi-Krum 使用客户端更新间距离，LASA 使用层级自适应稀疏聚合，FedSECA 使用稀疏更新与相似性加权，FL-Defender 使用低维方向特征识别异常，FedDMC-style 方法融合更新范数、方向、符号、稀疏度和跨轮行为。为适配本文的可见单客户端上传、无服务器根数据威胁模型，各方法共享相同的客户端模型、数据划分、攻击上传和训练轮数；适配不得额外提供本文方法无法使用的干净验证集、恶意身份或触发器信息。后续完成复现的新方法只有在通过相同接口、相同信息边界和原文核心机制核对后，才加入同一对比表。
+| Method | Code ID | Core operation | Primary 624-job matrix |
+| --- | --- | --- | --- |
+| FedAvg | `avg` | Uniform aggregation of all uploads | Yes |
+| Trimmed Mean | `tm` | Coordinate-wise trimmed aggregation | Yes |
+| Multi-Krum | `mk` | Distance-based Byzantine selection | Yes |
+| LASA | `lasa` | Layer-adaptive sparsified aggregation | Yes |
+| FedSECA | `seca` | Sign election and coordinate aggregation | Yes |
+| BNGuard | `bnguard` | Robust BN-feature distance filtering | Yes |
+| FedDMC-style | `dmc` | Magnitude, direction, sign, sparsity, and temporal views | Yes |
+| AE-SVDD (ours) | `svdd` | Fixed descriptor, AE reconstruction, and latent compactness | Yes |
+| FL-Defender | `fld` | PCA/reputation-based update detector | Registered; supplementary matrix only |
+| AlignIns | `alignins` | Direction and principal-sign alignment | Registered; supplementary matrix only |
+| FLGMM / FLANDERS | `flgmm` / `flanders` | Registered comparison implementations | Supplementary only when run under the same protocol |
 
-### 1.5 评价指标与统计规则
+The primary comparison table must not silently mix supplementary runs with the
+624-job matrix. A supplementary defense is included only when its JSON contains
+the same task, seed, rounds, client population, attack, and validation protocol.
 
-全局模型效用使用干净测试准确率（TACC）和相对于无攻击 FedAvg 的准确率下降（Accuracy Drop）评价，并使用完整逐轮准确率曲线观察收敛过程。图像后门实验额外报告攻击成功率（ASR），即写入同一触发器后被预测为目标标签的测试样本比例。评价后门防御时必须同时报告 TACC 与 ASR，以区分“模型整体失效”与“在保持正常性能的同时抑制后门”。AG News 的目标标签投毒不报告图像触发式 ASR。
+### 4.1.5 Evaluation Metrics
 
-检测能力使用恶意客户端召回率 RR（与 TPR 等价）、检测精度 DPR、整体检测准确率 DAR、良性客户端误拒率 FPR 和 F1。连续检测分数进一步计算 AUROC 和 AUPRC；当无攻击条件或某一统计切片只含单一类别时，相应 AUC 记为 NA，而不是填入 0 或 1。混合攻击除报告总体指标外，还按照实际分配的 LF、BD、GN、SF 和 LIE 身份分别计算 RR。
+#### Global utility
 
-每个配置至少运行三个随机种子，表格报告均值±标准差。最终性能以最后 10 轮均值为主，同时保留最后一轮、最佳轮次和完整逐轮记录。各方法使用配对的数据划分和随机种子；无攻击结果用于解释良性误拒，攻击结果用于解释恶意检出。效率仅报告现有结果元数据可直接得到的端到端运行时间和结果文件规模，并在相同硬件、执行器、客户端数量及训练轮数下比较。
+- **TACC:** clean test accuracy of the final global model.
+- **Accuracy Drop:** (\mathrm{TACC}_{\mathrm{FedAvg,clean}}-\mathrm{TACC}),
+  reported on the same dataset and seed.
+- **ASR:** for image backdoors, the fraction of triggered test images predicted
+  as the target label. TACC and ASR are always reported together for BD/Mix.
 
-## 2. 实验结果
+#### Client detection
 
-### 2.1 RQ1：不同数据集与攻击下的全局模型效用
+Let malicious clients be positives and rejected clients be predicted positives.
+We report detection accuracy (DAR), detection precision (DPR), malicious recall
+(RR, equivalent to TPR), benign false-rejection rate (FPR), and F1. The saved
+continuous selection scores additionally yield AUROC and AUPRC. AUC is `N/A`
+when a slice contains only one class.
 
-主实验在 MNIST、Fashion-MNIST、CIFAR-10 和 AG News 上统一比较 None、LF、GN、SF、LIE、BD 和 M1 混合攻击，以及全部对比防御。默认设置为 K=100、恶意比例 30% 和 300 轮，并分别在 IID 与 α=1.0 下运行。主结果表按数据集分块，以攻击为行、防御为列报告 TACC；图像 BD 和包含 BD 的 M1 额外报告 ASR。由于检测指标不适用于 FedAvg 的“检测能力”解释，FedAvg 的拒绝相关指标仅作为无筛选控制，不与检测器的 AUROC 作等价比较。
+For mixed attacks, RR is reported both overall and separately for LF, BD, GN, SF,
+and LIE according to the saved client-to-attack map. Overall RR must not hide a
+failure on one attack family.
 
-该实验回答两类问题：其一，攻击成功时 AE-SVDD 是否比 FedAvg 和鲁棒基线保留更高的干净准确率；其二，面对后门时，ASR 的下降是否伴随可接受的 TACC，而不是由模型性能崩溃造成。主表必须包含 None 条件，以显示各防御在没有攻击时的精度损失和良性误拒。CIFAR-10 和 AG News 进一步绘制 LIE 与 M1 下的逐轮 TACC 曲线；图像任务的 M1 曲线同时给出 ASR。
+#### Aggregation and stability
 
-**表 1　不同数据集和攻击下的全局模型效用**
+We also retain accepted-client fraction, selected rejection ratio, validation
+accuracy for each candidate, center norm, latent variance, center shift, and the
+three losses. These diagnostics explain whether utility changes come from correct
+filtering, excessive benign rejection, or unstable AE training.
 
-| 数据集 | 数据划分 | 攻击 | 指标 | FedAvg | Trimmed Mean | Multi-Krum | LASA | FedSECA | FL-Defender | FedDMC | AE-SVDD |
+Every configuration runs three seeds. Tables report mean +/- sample standard
+deviation; the main endpoint is the mean over the last 10 rounds. The final-round
+value, best-round value, and complete per-round curve remain available for audit.
+
+### 4.1.6 Implementation Details
+
+AE-SVDD describes the trainable model delta with a fixed hierarchical multi-view
+descriptor. The primary descriptor has dimension 4096, seed 2027, and view ratios
+global/layer/statistics = 0.5/0.375/0.125. Its input is the pre-round client
+delta; BN/LN-specific features are not used by the primary protocol.
+
+The two phases use independent selection-score fields:
+
+\[
+r_i = \operatorname{mean}_j |\hat{x}_{ij}-x_{ij}|,
+\qquad
+d_i = \lVert z_i-c\rVert_2^2.
+\]
+
+The primary schedule is `phase1_rounds = 15`, Phase 1 score=`recon`, and Phase 2
+score=`svdd`. In Phase 1 the AE is trained with reconstruction loss. In Phase 2
+the training objective is
+
+\[
+L_2 = \alpha L_{\mathrm{SVDD}} + (1-\alpha)L_{\mathrm{recon}},
+\qquad \alpha=0.5.
+\]
+
+`alpha` is a loss coefficient only. It does not weight the client-selection score
+and it does not change final aggregation weights. The `combined` score, used only
+in the score ablation, is the average of the rank-normalized (r_i) and (d_i).
+
+The remaining fixed AE/SVDD values are `latent_dim=64`, `ae_lr=1e-3`,
+`ae_weight_decay=1e-6`, `ae_grad_clip=1.0`, `center_ema_decay=0.9`,
+`center_init_quantile=0.5`, `phase2_recon_quantile=0.8`, and
+`svdd_feature_clip=10`. These are held constant unless a subsection explicitly
+varies one of them.
+
+At every phase, the server ranks finite client scores and evaluates the internal
+candidate rejection ratios `(0.00, 0.10, 0.20, 0.30, 0.40)` on the fixed clean
+validation set. The candidate with the highest validation TACC is selected; an
+exact tie chooses the larger rejection ratio. The selected accepted mask is
+normalized into the aggregation weights. The candidate grid is an internal
+selection protocol, not a user-facing rejection-ratio hyperparameter.
+
+The primary matrix leaves client gradient and update clipping disabled (`None`) so
+attack comparisons preserve the canonical upload behavior. A separate numerical-
+stability variant may set both `client_grad_clip` and `client_update_clip` to 5.0;
+its results are labeled and never pooled with the unclipped primary matrix. AE and
+SVDD optimizer clipping remain enabled at 1.0.
+
+All runs are launched from JSON files. Each completed result contains `meta`, an
+exactly `total_rounds`-long `rounds` array, effective configuration, attack
+metadata, per-round selection scores, accepted IDs, normalized aggregation
+weights, candidate validation accuracies, and losses. Truncated or non-finite
+results are excluded before aggregation.
+
+## 4.2 Overall Defense Performance
+
+The primary matrix compares all eight canonical defenses on every supported attack
+and dataset. Results are grouped by dataset and partition; `none` is retained as a
+clean control. For image BD and M1, ASR is shown beside TACC. The intended claim is
+not merely high detection: the defense must preserve clean accuracy while lowering
+attack impact and avoiding excessive benign rejection.
+
+**Table 1. Overall clean utility and attack suppression (mean +/- std).**
+
+| Dataset | Split | Attack | Metric | FedAvg | TM | Multi-Krum | LASA | FedSECA | BNGuard | FedDMC | AE-SVDD |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |  |  |  |  |
+|  |  |  | TACC |  |  |  |  |  |  |  |  |
+|  |  |  | ASR (image only) |  |  |  |  |  |  |  |  |
 
-> **图 1 占位：** CIFAR-10 和 AG News 在 LIE 与 M1 下的逐轮 TACC 收敛曲线；图像任务同时绘制 ASR。阴影表示三个随机种子的标准差。
+Report a separate convergence plot for representative CIFAR-10 and AG News
+conditions, with seed standard-deviation bands. Do not infer a defense win from
+an accuracy collapse that happens to reduce ASR.
 
-### 2.2 RQ2：单一攻击与混合攻击下的恶意客户端检测
+## 4.3 Malicious Client Detection
 
-#### 2.2.1 单一攻击检测
+Detection results are reported independently from global utility. Each row is
+paired by dataset, split, attack, and seed, and contains both score-based and
+decision-based metrics.
 
-首先在与主实验相同的四个数据集和默认联邦设置下，对 LF、GN、SF、LIE 和 BD 分别报告 DAR、DPR、RR、FPR、F1、AUROC 和 AUPRC。检测结果与全局模型效用分开呈现，因为准确率恢复并不必然意味着恶意客户端被正确识别。逐轮结果同时展示客户端保留率和检测分数分布，以观察预热阶段、边界形成阶段和稳定阶段的变化。
+### 4.3.1 Individual Attacks
 
-**表 2　单一攻击下的恶意客户端检测结果**
+Run LF, GN, SF, LIE, and BD separately with the primary 30% malicious-client
+setting. For each attack, show the score distribution over benign and malicious
+clients, accepted fraction, and per-round detection metrics. BD rows include ASR;
+AG News rows do not include image ASR.
 
-| 数据集 | 数据划分 | 攻击 | 防御 | DAR | DPR | RR | FPR | F1 | AUROC | AUPRC |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |  |  |  |
+**Table 2. Individual-attack detection.**
 
-> **图 2 占位：** 不同单一攻击下的逐轮检测分数分布、良性/恶意分离情况和客户端保留率。
+| Dataset | Split | Attack | Defense | DAR | DPR | RR | FPR | F1 | AUROC | AUPRC | TACC | ASR |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |  |  |  |  |
 
-#### 2.2.2 混合攻击检测
+### 4.3.2 Mixed Attacks
 
-随后专门比较 M1、M2 和 M3。该实验固定 K=100、恶意比例 30%，在 IID 和 α=1.0 下运行全部防御方法。除总体 DAR、DPR、RR 和 FPR 外，依据保存的恶意客户端攻击映射分别计算各攻击族 RR，并报告 TACC；含 BD 的图像组合同时报告 ASR。若总体 RR 较高但某一攻击族 RR 明显较低，应判定方法对该类攻击存在检测缺口，不能以总体平均值掩盖。M1 用于检验数据投毒、后门和明显模型异常同时存在的情况，M2 用于检验符号和统计伪装攻击与标签投毒共同存在的情况，M3 用于形成覆盖两阶段预期作用范围的更复杂混合环境。
+Run M1 in the primary matrix and M2/M3 as mixed-attack supplements. Different
+malicious clients execute different attack modules in the same round. Report
+overall detection and attack-family recall, not just an average over attack types.
 
-**表 3　混合攻击的总体检测与分类别检出结果**
+**Table 3. Mixed-attack detection and utility.**
 
-| 数据集 | 数据划分 | 混合组合 | 防御 | DAR | DPR | 总体 RR | LF RR | BD RR | GN RR | SF RR | LIE RR | FPR | TACC | ASR |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Dataset | Split | Mix | Defense | DAR | DPR | Overall RR | LF RR | BD RR | GN RR | SF RR | LIE RR | FPR | TACC | ASR |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
 
-> **图 3 占位：** M1、M2 和 M3 中不同攻击族 RR 的分组柱状图，同时展示总体 RR，避免平均指标掩盖单一攻击族的检测失败。
+## 4.4 Ablation Study
 
-### 2.3 RQ3：两阶段机制的作用边界与互补性
+All ablations keep the task, partition, seed, client count, attack parameters,
+validation size, and local training budget fixed. Only the named factor changes.
 
-该实验不预设“第一阶段一定检测模型攻击、第二阶段一定检测后门”的结论，而是直接验证这一机制假设。实验固定 CIFAR-10、K=100、恶意比例 30%、300 轮，并在 IID 和 α=1.0 下分别运行 GN、SF、LIE、LF、BD 和 M1。比较四种配置：FedAvg 无检测控制；P1-only，将 `phase1_rounds` 设为总轮数，仅使用重建误差筛选与聚合；P2-only，将 `phase1_rounds` 设为 0，从首轮开始使用潜在空间中心、阈值筛选和可信聚合；Full，使用默认 15 轮第一阶段后切换到第二阶段。
+### 4.4.1 Two-stage Architecture
 
-对 GN、SF 和 LIE，重点比较第一阶段重建误差的良恶分离、RR、FPR 与 TACC；对 LF 和 BD，重点比较第二阶段潜在距离、可信权重、RR、FPR、TACC 与图像 ASR；M1 用于验证 Full 是否能在同一环境中同时处理两类异常。逐轮报告重建误差、潜在距离、接受掩码和聚合权重。只有当某阶段既形成稳定的良恶分离，又改善相应检测指标，才能将性能收益归因于检测；若 ASR 或攻击影响下降但检测分数没有分离，只能解释为聚合抑制，不能宣称准确识别了后门客户端。Full 与两个单阶段版本的比较用于回答阶段间是否互补，而不是把阶段编号直接等同于攻击类别。
+The mechanism ablation compares the following configurations. The phrase
+“compactness error” means latent SVDD distance (d_i), not a residual of the
+FedAvg aggregation operation.
 
-**表 4　两阶段机制对比结果**
+| Configuration | Phase 1 | Phase 2 | Training objective | Purpose |
+| --- | --- | --- | --- | --- |
+| FedAvg | No filtering | No filtering | N/A | Attack-only control |
+| P1-only | All rounds ranked by (r_i) | Not entered | (L_{recon}) | Reconstruction mechanism boundary |
+| P2-only | Skipped (`phase1_rounds=0`) | All rounds ranked by (d_i) | α(L_{SVDD})+(1-α)(L_{recon}) | Early-center and no-warmup behavior |
+| Full | First 15 rounds ranked by (r_i) | Remaining rounds ranked by (d_i) | Phase-specific objectives above | Complementarity of the complete schedule |
 
-| 攻击 | 数据划分 | 配置 | TACC | ASR | RR | FPR | 客户端保留率 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |
+Use the RQ3 runner with LF, GN, SF, LIE, BD, and M1, ratios 10%, 20%, 30%, and
+40%, plus a 0% clean control, and seeds 42--44. The default RQ3 runner uses 100 rounds for the
+mechanism screen; a selected configuration is confirmed for 300 rounds. Claim
+complementarity only when Full improves the same attack/ratio/seed comparison,
+not from a cross-condition average.
 
-> **图 4 占位：** P1-only、P2-only 和 Full 的逐轮重建误差、潜在距离、RR、FPR、TACC 与 ASR；以第 15 轮标记默认阶段切换位置。
+**Table 4. Two-stage architecture ablation.**
 
-### 2.4 RQ4：恶意客户端比例
-
-固定 CIFAR-10、K=100 和 α=1.0，将恶意比例设置为 10%、20%、30% 和 40%，比较 LF、LIE、BD 与 M1 下的 TACC、ASR、RR 和 FPR。正式结论只覆盖良性客户端占多数的 10%–40% 范围；50% 仅作为多数良性假设接近失效时的边界观察，不并入主结果均值。该实验单独回答检测边界随攻击者占比变化的问题，不与客户端数量变化混合解释。
-
-**表 5　不同恶意客户端比例下的检测与模型效用**
-
-| 攻击 | 恶意比例 | 防御 | TACC | ASR | RR | FPR |
-| --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |
-
-> **图 5 占位：** 恶意比例从 10% 增加到 40% 时的 TACC、ASR、RR 和 FPR 变化曲线；50% 边界点使用不同标记。
-
-### 2.5 RQ5：客户端规模与可扩展性
-
-固定恶意比例 30% 和 α=1.0，将客户端数量设置为 50、100 和 200，比较检测质量、全局模型效用与端到端运行时间。该实验检验单类中心和鲁棒阈值在参与方数量变化时是否稳定，同时验证当前批处理客户端执行器能否支持计划规模。恶意客户端数量始终按照 30% 同步调整，使实验只改变总体规模而不改变攻击者占比。
-
-**表 6　不同客户端规模下的效果与开销**
-
-| 客户端数量 | 攻击 | 防御 | TACC | RR | FPR | 端到端时间 |
-| --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |
-
-> **图 6 占位：** K=50、100 和 200 时检测效果、模型效用与端到端运行时间的对照图。
-
-### 2.6 RQ6：数据异质性的影响
-
-固定 K=100 和恶意比例 30%，比较 IID、α=1.0、α=0.5 和 α=0.1。主要报告正常客户端 FPR、恶意客户端 RR 和 TACC，用于分析正常 client drift 对单类边界的干扰。α 是环境因素而不是本文方法的主要实验机制，α=0.5 和 α=0.1 的结果只说明适用边界，不解释为方法消除了 non-IID。
-
-**表 7　不同数据异质性下的检测与模型效用**
-
-| 数据划分 | 攻击 | 防御 | TACC | RR | FPR |
-| --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |
-
-> **图 7 占位：** IID、α=1.0、α=0.5 和 α=0.1 下的 TACC、RR 与 FPR 变化曲线。
-
-### 2.7 RQ7：攻击强度的影响
-
-分别调整 `gaussian_sigma`、`sign_flip_scale`、`lie_z_override`、`backdoor_poison_ratio` 和 `backdoor_model_replace_scale`，形成由弱到强的攻击序列。每个强度点同时报告攻击效果、TACC、RR 和 FPR，图像后门还报告 ASR，从而区分“弱攻击本身没有奏效”与“成功攻击被防御检测并抑制”。不同攻击的强度参数含义不同，因此分别绘制强度曲线，不把它们合并成一个统一的数值轴。
-
-**表 8　不同攻击强度下的检测与攻击效果**
-
-| 攻击 | 强度参数 | 参数取值 | 防御 | TACC | ASR | RR | FPR |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |  |
-
-> **图 8 占位：** GN、SF、LIE 和 BD 的攻击强度—攻击效果—检测率关系图，每种攻击使用独立子图和横轴。
-
-### 2.8 RQ8：动态收紧阈值
-
-默认阈值由 `tau_start` 到 `tau_end` 线性收紧；静态对照将二者设为相同值。实验在 CIFAR-10、K=100、30% 恶意和 α=1.0 下比较 LIE、BD 与 M1，报告早期和后期的 RR、FPR、客户端保留率、TACC 及图像 ASR，以判断动态收紧能否缓解训练早期边界不稳定造成的误拒，同时减少后期漏检。
-
-**表 9　动态阈值与静态阈值的比较**
-
-| 攻击 | 阈值策略 | TACC | ASR | RR | FPR | 客户端保留率 |
-| --- | --- | --- | --- | --- | --- | --- |
-|  |  |  |  |  |  |  |
-
-> **图 9 占位：** 动态与静态阈值下的阈值轨迹、客户端保留率、RR 和 FPR 逐轮曲线。
-
-### 2.9 RQ9：特征描述、压缩维度与计算代价
-
-将 `param_descriptor_dim` 设置为 64、256、1024、4096 和 8192，在相同模型、客户端划分、攻击和随机种子下报告 TACC、RR、FPR、端到端运行时间和结果文件规模。该实验检验压缩是否在降低输入规模的同时保留足够的异常信息，并据此选择准确性与开销之间的折中点。特征维度与计算代价在此共同分析，是因为计算代价是改变压缩维度的直接结果，而不是独立的环境因素。
-
-在固定投影维度 4096 的条件下，进一步比较全局视角、分层视角和统计视角。单视角配置分别设为 `(1,0,0)`、`(0,1,0)` 和 `(0,0,1)`；双视角配置将未使用视角的比例置零并对保留视角重新归一化；完整方法使用默认比例 `(0.5,0.375,0.125)`。该实验属于固定描述器的结构消融，不与其他超参数进行联合寻优。所有比例分别由 `param_descriptor_global_ratio`、`param_descriptor_layer_ratio` 和 `param_descriptor_statistics_ratio` 配置，三者非负且总和为 1。
-
-**表 10　特征压缩维度的效果—开销权衡**
-
-| 投影维度 | 全局视角比例 | 分层视角比例 | 统计视角比例 | 攻击 | TACC | RR | FPR | 端到端时间 | 结果文件规模 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Malicious ratio | Attack | Configuration | TACC | ASR | RR | FPR | AUROC | AUPRC | Accepted fraction |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 |  |  |  |  |  |  |  |  |  |  |
 
-> **图 10 占位：** （a）投影维度与 TACC/RR、端到端运行时间之间的双轴权衡图；（b）单视角、双视角与完整三视角描述器的检测指标分组柱状图。
+### 4.4.2 Phase-2 Detection Score
 
-### 2.10 RQ10：可信样本分位数
+Keep Phase 1 fixed to reconstruction, `phase1_rounds=15`, and α=0.5. Compare the
+three supported Phase-2 scores:
 
-中心初始化仅使用重建误差较低的客户端潜在表示，其比例由 `center_init_quantile` 控制；第二阶段重建目标仅使用当前轮重建误差较低的样本，其比例由 `phase2_recon_quantile` 控制。实验固定 CIFAR-10、K=100、30% 恶意和 α=1.0，将中心初始化分位数设置为 0.3、0.5 和 0.7，将第二阶段重建分位数设置为 0.6、0.7、0.8 和 0.9，形成 12 组配置。分别在 LIE、BD 和 M1 下报告 TACC、ASR、RR、FPR 以及中心范数，选择能在低误拒与稳定检测之间取得平衡的配置。该实验与动态阈值实验分开，因为分位数控制训练样本可信度，而 `tau` 控制客户端接受边界。
+- `recon`: rank by reconstruction error (r_i);
+- `svdd`: rank by latent compactness distance (d_i) (primary);
+- `combined`: average the rank-normalized (r_i) and (d_i).
 
-**表 11　可信样本分位数的影响**
+This is a score ablation, not a loss ablation. The loss remains the same for all
+three rows. Use 100-round screening over GN, SF, LIE, BD, and M1, then repeat the
+best mode on the 300-round primary protocol.
 
-| 中心初始化分位数 | 第二阶段重建分位数 | 攻击 | TACC | ASR | RR | FPR | 中心范数 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
+**Table 5. Phase-2 score ablation.**
+
+| Dataset | Attack | Phase-2 score | TACC | ASR | RR | FPR | AUROC | AUPRC | Selected rejection ratio |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  | recon / combined / svdd |  |  |  |  |  |  |  |
+
+### 4.4.3 Validation-driven Top-K Selection
+
+The server does not expose a rejection ratio as a tunable run parameter. Instead,
+each round it evaluates the internal candidate set
+
+\[
+\rho \in \{0, 0.10, 0.20, 0.30, 0.40\},
+\]
+
+where ρ is the fraction rejected after ranking finite scores. For each candidate,
+the server aggregates the corresponding lowest-score uploads and measures clean
+validation TACC. The largest validation-TACC candidate is used for the actual
+global update; ties are resolved toward larger ρ. Non-finite rows are ineligible,
+even if the nominal candidate would keep them.
+
+To quantify the value of this rule, report (i) the selected ρ distribution, (ii)
+the validation accuracy of every candidate, (iii) the fixed-ratio replay for each
+candidate, and (iv) the final test TACC/ASR and detection metrics. This directly
+tests validation-driven selection without introducing a rejection-ratio
+hyperparameter.
+
+**Table 6. Validation-driven Top-K ablation.**
+
+| Dataset | Attack | Selection rule | Candidate ρ | Validation TACC | Test TACC | ASR | RR | FPR |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  | validation-selected / fixed replay |  |  |  |  |  |  |
+
+## 4.5 Parameter Sensitivity
+
+Sensitivity experiments vary one AE-SVDD factor at a time. The primary fixed
+configuration is descriptor dimension 4096, Phase 1 length 15, Phase-1 score
+`recon`, Phase-2 score `svdd`, and α=0.5 unless the subsection changes that factor.
+The screening budget is 100 rounds; the selected setting is re-run for 300 rounds
+with seeds 42--44 before being used in the primary claims.
+
+### 4.5.1 Loss Coefficient
+
+Sweep `alpha` in `{0.25, 0.50, 0.75}`. The endpoints 0 and 1 may be included as
+diagnostic pure-reconstruction and pure-SVDD controls, but are not needed for the
+main sensitivity claim. Keep selection scores fixed (`recon` then `svdd`) so this
+experiment changes only the Phase-2 training objective.
+
+**Table 7. Loss-coefficient sensitivity.**
+
+| Dataset | Attack | α | TACC | ASR | RR | FPR | AUROC | AUPRC | SVDD loss | Recon loss |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |  |  |
+
+### 4.5.2 Phase-1 Duration
+
+Sweep `phase1_rounds` in `{5, 15, 30, 50}` with total rounds fixed at 100 for
+screening. Phase 1 always uses reconstruction ranking and Phase 2 always uses
+SVDD ranking. This isolates how long the AE has to establish a reconstruction
+representation before the center-based score is activated.
+
+**Table 8. Phase-1 duration sensitivity.**
+
+| Dataset | Attack | Phase-1 rounds | TACC | ASR | RR | FPR | Selected switch round | Runtime |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |
+
+### 4.5.3 Trusted Validation Set Size
+
+Vary the direct sample count `server_validation_size` in `{10, 25, 50, 100,
+200}`. Each set remains clean, stratified, and withheld from clients. The primary
+value is 50 samples; it is not 50 groups multiplied by a batch size. Keep the
+candidate rejection grid and tie rule unchanged so only validation reliability
+changes.
+
+**Table 9. Trusted-validation-set sensitivity.**
+
+| Dataset | Attack | Validation samples | TACC | ASR | RR | FPR | Candidate-choice agreement | Runtime |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |
+
+## 4.6 Robustness Analysis
+
+Robustness factors are environment or attacker factors, not AE-SVDD training
+hyperparameters. Unless stated otherwise, use the 300-round primary schedule and
+report the final-10-round mean with three seeds.
+
+### 4.6.1 Malicious Client Ratio
+
+Use malicious ratios 10%, 20%, 30%, and 40%, with a 0% clean control. Keep
+`num_clients=100` and adjust `num_malicious` so the benign-majority assumption is
+explicit. A 50% boundary point may be shown separately, but it is not part of the
+main robustness average or a claim under the benign-majority assumption.
+
+**Table 10. Malicious-ratio robustness.**
+
+| Dataset | Attack | Malicious ratio | TACC | ASR | RR | FPR | AUROC | AUPRC |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |
+
+### 4.6.2 Data Heterogeneity
+
+Compare IID (`dirichlet_alpha=null`), Dirichlet α=1.0, α=0.5, and α=0.1 with
+100 clients and 30% malicious clients. Report benign FPR separately from malicious
+RR to reveal whether normal client drift is being rejected.
+
+**Table 11. Data-heterogeneity robustness.**
+
+| Dataset | Dirichlet α | Attack | TACC | ASR | RR | FPR |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+|  | IID / 1.0 / 0.5 / 0.1 |  |  |  |  |  |
+
+### 4.6.3 Number of Clients
+
+Set (K\in\{50,100,200\}), keep the malicious ratio at 30%, and scale the
+malicious count with K. Keep the local batch and round budget unchanged. Report
+both quality and wall-clock scaling; do not attribute a change caused by a
+different attacker ratio to client scale.
+
+**Table 12. Client-scale robustness and scaling.**
+
+| Clients K | Malicious clients | Attack | TACC | ASR | RR | FPR | Runtime | Peak memory |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |
+
+### 4.6.4 Attack Intensity
+
+Vary one attack-specific strength at a time while keeping all other settings
+fixed. The following grid gives interpretable weak-to-strong points:
+
+| Attack | Parameter | Values |
+| --- | --- | --- |
+| GN | `gaussian_sigma` | 0.1, 0.3, 0.5, 1.0 |
+| SF | `sign_flip_scale` | 0.25, 0.5, 1.0, 2.0 |
+| LIE | `lie_z_override` | 0.2, 0.524, 0.8, 1.0 |
+| BD | `backdoor_poison_ratio` | 0.2, 0.4, 0.6, 0.8 |
+| BD | `backdoor_model_replace_scale` | 1.0, 2.0, 3.0, 5.0 |
+
+For each attack, report attack success (ASR where applicable), TACC, RR, and FPR
+on an independent horizontal axis. This distinguishes an attack that never
+ succeeds from a successful attack that the defense suppresses.
+
+**Table 13. Attack-intensity robustness.**
+
+| Dataset | Attack | Intensity parameter | Value | TACC | ASR | RR | FPR |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 |  |  |  |  |  |  |  |  |
 
-> **图 11 占位：** 中心初始化分位数 × 第二阶段重建分位数的 TACC、RR、FPR 和 ASR 热力图。
+## 4.7 Computational Overhead
 
-以上所有实验条件均对应现有任务、攻击、防御或超参数配置：数据集、K、恶意数量、α、随机种子和混合攻击由联邦配置控制；攻击强度、阶段长度、动态阈值、投影维度、三视角比例和可信样本分位数由超参数配置控制；防御方法由统一注册表选择。正式实验不依赖临时修改训练源码，也不加入当前代码尚不支持的部分参与、攻击时序或客户端样本量不均衡机制。
+Measure overhead on the same hardware, software environment, client count, round
+count, and worker schedule. Each measurement excludes dataset download and is
+repeated for all three seeds. Report median wall-clock time and standard
+deviation; include peak allocated GPU memory and throughput where available.
+
+The comparison separates (i) client local training, (ii) descriptor construction,
+(iii) AE/SVDD update, (iv) validation candidate evaluation, and (v) aggregation.
+For AE-SVDD, validation evaluation is repeated once per internal candidate ratio;
+this cost is part of the method and must not be omitted. JSON and JSONL result
+sizes are reported as storage overhead, not GPU time.
+
+**Table 14. Computational overhead.**
+
+| Dataset | Defense | Clients | Rounds | Wall time | Time/round | Peak GPU memory | Throughput (clients/s) | Result size |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|  |  |  |  |  |  |  |  |  |
+
+All conclusions must be made from complete, parseable result files with the
+expected round count. Incomplete runs, non-finite feature failures, OOM traces,
+and truncated logs are reported as failures and excluded from mean/std tables;
+they are summarized separately in the reproducibility appendix.
