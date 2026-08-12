@@ -29,12 +29,12 @@ Four tasks cover native grayscale images, color images, and text. Dataset loader
 create one fixed, clean server validation subset before client partitioning; those
 samples are not assigned to any client.
 
-| Dataset | Input and classes | Global model in the codebase | Purpose |
-| --- | --- | --- | --- |
-| MNIST | 28 x 28 grayscale, 10 classes | Native-resolution LeNet-style classifier (`LeNetClassifier`) | Basic image classification and attack sanity check |
-| Fashion-MNIST | 28 x 28 grayscale, 10 classes | Lightweight two-convolution CNN (`FashionCNN`) | Fine-grained grayscale classes and stability check |
-| CIFAR-10 | 32 x 32 RGB, 10 classes | CIFAR-adapted ResNet-18 (3 x 3 stem, no initial max-pool) | Deeper visual model and the main robustness task |
-| AG News | Tokenized text, 4 classes | Lightweight Transformer classifier with a BN compatibility head | Cross-modal transfer to a text model |
+| Dataset       | Input and classes             | Global model in the codebase                                 | Purpose                                            |
+| ------------- | ----------------------------- | ------------------------------------------------------------ | -------------------------------------------------- |
+| MNIST         | 28 x 28 grayscale, 10 classes | Native-resolution LeNet-style classifier (`LeNetClassifier`) | Basic image classification and attack sanity check |
+| Fashion-MNIST | 28 x 28 grayscale, 10 classes | Lightweight two-convolution CNN (`FashionCNN`)               | Fine-grained grayscale classes and stability check |
+| CIFAR-10      | 32 x 32 RGB, 10 classes       | CIFAR-adapted ResNet-18 (3 x 3 stem, no initial max-pool)    | Deeper visual model and the main robustness task   |
+| AG News       | Tokenized text, 4 classes     | Lightweight Transformer classifier with a BN compatibility head | Cross-modal transfer to a text model               |
 
 Absolute accuracy is compared only within a dataset. Cross-dataset conclusions
 use relative accuracy drop, detection quality, and overhead rather than raw TACC.
@@ -46,34 +46,34 @@ therefore reported as `N/A`.
 The primary protocol is fixed for every defense and attack so that only the
 defense or attack factor changes.
 
-| Setting | Primary value |
-| --- | --- |
-| Total clients (K) | 100 |
-| Malicious clients | 30 (30%; client IDs are used only for post-hoc scoring) |
-| Participation | All 100 clients each communication round |
-| Communication rounds | 300 |
-| Local epochs / batch size | 1 / 64 |
-| Client optimizer | SGD, momentum 0.9 |
-| Data partition | Dirichlet α = 1.0 in the primary matrix; IID is the clean reference condition |
+| Setting                       | Primary value                                                |
+| ----------------------------- | ------------------------------------------------------------ |
+| Total clients (K)             | 100                                                          |
+| Malicious clients             | 30 (30%; client IDs are used only for post-hoc scoring)      |
+| Participation                 | All 100 clients each communication round                     |
+| Communication rounds          | 300                                                          |
+| Local epochs / batch size     | 1 / 64                                                       |
+| Client optimizer              | SGD, momentum 0.9                                            |
+| Data partition                | Dirichlet α = 1.0 in the primary matrix; IID is the clean reference condition |
 | Trusted server validation set | 50 clean training samples, stratified and withheld from clients |
-| Random seeds | 42, 43, and 44 |
-| Runtime | JSON-driven pipeline, CUDA when available, deterministic job-level seed |
+| Random seeds                  | 42, 43, and 44                                               |
+| Runtime                       | JSON-driven pipeline, CUDA when available, deterministic job-level seed |
 
 Task calibration is performed once on clean FedAvg using only TACC. The selected
 client optimizer settings are then shared by FedAvg, every baseline, and AE-SVDD:
 
-| Dataset | `client_lr` | `client_weight_decay` |
-| --- | ---: | ---: |
-| MNIST | 0.10 | 1e-4 |
-| Fashion-MNIST | 0.10 | 0 |
-| CIFAR-10 | 0.05 | 1e-4 |
-| AG News | 0.10 | 0 |
+| Dataset       | `client_lr` | `client_weight_decay` |
+| ------------- | ----------: | --------------------: |
+| MNIST         |        0.10 |                  1e-4 |
+| Fashion-MNIST |        0.10 |                     0 |
+| CIFAR-10      |        0.05 |                  1e-4 |
+| AG News       |        0.10 |                     0 |
 
 The canonical primary generator (`tools/generate_primary_matrix.py`) produces
-816 jobs: (3\times9\times8\times3=648) image jobs and
-(7\times8\times3=168) AG News jobs. Image attacks are
-`none, lf, gn, sf, lie, minmax, minsum, bd, mix`; AG News uses
-`none, lf, gn, sf, lie, minmax, minsum` because it has no image trigger. The separate RQ3
+624 jobs: (3\times7\times8\times3=504) image jobs and
+(5\times8\times3=120) AG News jobs. Image attacks are
+`none, lf, gn, sf, lie, bd, mix`; AG News uses
+`none, lf, gn, sf, lie` because it has no image trigger. The separate RQ3
 mechanism matrix uses the same data protocol but varies the malicious ratio and
 mechanism explicitly.
 
@@ -82,23 +82,20 @@ mechanism explicitly.
 The attack implementations are modular client components under `src/attacks`.
 Unless a sensitivity experiment says otherwise, the following values are fixed.
 
-| ID | Attack level | Upload or data transformation | Primary value |
-| --- | --- | --- | --- |
-| None | Control | Ordinary local training | No malicious clients |
-| LF | Data poisoning | Symmetric label map (y' = C-1-y) | Fixed by the task label space |
-| GN | Model poisoning | Replace each floating tensor by a moment-matched Gaussian draw | `gaussian_sigma = 0.3` |
-| SF | Model/update poisoning | Upload (W_g - s(W_l-W_g)) | `sign_flip_scale = 1.0` |
-| LIE / ALIE | Statistical model poisoning | Craft Δ as μ + zσ from benign updates (the model-delta equivalent of the original gradient-space form) | Automatically compute \(s=\lfloor K/2\rfloor+1-M\), \(z=\Phi^{-1}((K-M-s)/(K-M))\); at K=100, M=30, z≈0.5244 |
-| Min-Max | Omniscient model poisoning | Craft Δ=μ+λδ while constraining its largest benign-pair distance | δ is sample standard deviation; λ uses the source binary search |
-| Min-Sum | Omniscient model poisoning | Craft Δ=μ+λδ while constraining its summed benign distance | δ is sample standard deviation; λ uses the source binary search |
-| BD | Data + model replacement | Lower-right square trigger, target label, then amplify update | target 0; poison 0.6; trigger 5; value 1.0; replacement 3.0 |
-| Mix (M1) | Simultaneous mixed attack | Deterministic round-robin assignment across malicious clients | `lf,bd,gn,sf,lie,minmax,minsum` |
+| ID       | Attack level                | Upload or data transformation                                | Primary value                                               |
+| -------- | --------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
+| None     | Control                     | Ordinary local training                                      | No malicious clients                                        |
+| LF       | Data poisoning              | Symmetric label map (y' = C-1-y)                             | Fixed by the task label space                               |
+| GN       | Model poisoning             | Replace each floating tensor by a moment-matched Gaussian draw | `gaussian_sigma = 0.3`                                      |
+| SF       | Model/update poisoning      | Upload (W_g - s(W_l-W_g))                                    | `sign_flip_scale = 1.0`                                     |
+| LIE      | Statistical model poisoning | Craft Δ as μ + zσ from benign updates                        | `lie_z_override = 0.524` in the primary matrix              |
+| BD       | Data + model replacement    | Lower-right square trigger, target label, then amplify update | target 0; poison 0.6; trigger 5; value 1.0; replacement 3.0 |
+| Mix (M1) | Simultaneous mixed attack   | Deterministic round-robin assignment across malicious clients | `lf,bd,gn`                                                  |
 
 Mix is simultaneous: different malicious clients apply different attacks in the
 same round. It is not a random choice of one attack per round. The assignment
-map is written to each result file, allowing per-family recall. Every coordinated
-component (LIE, Min-Max, and Min-Sum) is constructed from the same benign-update
-view and only overwrites the malicious clients assigned to that component.
+map is written to each result file, allowing per-family recall. Supplementary
+mixed combinations are M2=`lf,sf,lie` and M3=`lf,bd,gn,lie`.
 
 AG News uses target-label poisoning for BD-like behavior if explicitly studied,
 but the primary AG News matrix excludes `bd` and `mix`.
@@ -109,22 +106,22 @@ All methods receive the same client states, data partitions, round budget, and
 information boundary. No baseline is given the malicious identity or the clean
 validation labels unless its protocol explicitly uses the shared validation set.
 
-| Method | Code ID | Core operation | Primary 816-job matrix |
-| --- | --- | --- | --- |
-| FedAvg | `avg` | Uniform aggregation of all uploads | Yes |
-| Trimmed Mean | `tm` | Coordinate-wise trimmed aggregation | Yes |
-| Multi-Krum | `mk` | Distance-based Byzantine selection | Yes |
-| LASA | `lasa` | Layer-adaptive sparsified aggregation | Yes |
-| FedSECA | `seca` | Sign election and coordinate aggregation | Yes |
-| BNGuard | `bnguard` | Robust BN-feature distance filtering | Yes |
-| FedDMC-style | `dmc` | Magnitude, direction, sign, sparsity, and temporal views | Yes |
-| AE-SVDD (ours) | `svdd` | Fixed descriptor, AE reconstruction, and latent compactness | Yes |
-| FL-Defender | `fld` | PCA/reputation-based update detector | Registered; supplementary matrix only |
-| AlignIns | `alignins` | Direction and principal-sign alignment | Registered; supplementary matrix only |
-| FLGMM / FLANDERS | `flgmm` / `flanders` | Registered comparison implementations | Supplementary only when run under the same protocol |
+| Method           | Code ID              | Core operation                                              | Primary 624-job matrix                              |
+| ---------------- | -------------------- | ----------------------------------------------------------- | --------------------------------------------------- |
+| FedAvg           | `avg`                | Uniform aggregation of all uploads                          | Yes                                                 |
+| Trimmed Mean     | `tm`                 | Coordinate-wise trimmed aggregation                         | Yes                                                 |
+| Multi-Krum       | `mk`                 | Distance-based Byzantine selection                          | Yes                                                 |
+| LASA             | `lasa`               | Layer-adaptive sparsified aggregation                       | Yes                                                 |
+| FedSECA          | `seca`               | Sign election and coordinate aggregation                    | Yes                                                 |
+| BNGuard          | `bnguard`            | Robust BN-feature distance filtering                        | Yes                                                 |
+| FedDMC-style     | `dmc`                | Magnitude, direction, sign, sparsity, and temporal views    | Yes                                                 |
+| AE-SVDD (ours)   | `svdd`               | Fixed descriptor, AE reconstruction, and latent compactness | Yes                                                 |
+| FL-Defender      | `fld`                | PCA/reputation-based update detector                        | Registered; supplementary matrix only               |
+| AlignIns         | `alignins`           | Direction and principal-sign alignment                      | Registered; supplementary matrix only               |
+| FLGMM / FLANDERS | `flgmm` / `flanders` | Registered comparison implementations                       | Supplementary only when run under the same protocol |
 
 The primary comparison table must not silently mix supplementary runs with the
-816-job matrix. A supplementary defense is included only when its JSON contains
+624-job matrix. A supplementary defense is included only when its JSON contains
 the same task, seed, rounds, client population, attack, and validation protocol.
 
 ### 4.1.5 Evaluation Metrics
@@ -146,7 +143,7 @@ continuous selection scores additionally yield AUROC and AUPRC. AUC is `N/A`
 when a slice contains only one class.
 
 For mixed attacks, RR is reported both overall and separately for LF, BD, GN, SF,
-LIE, Min-Max, and Min-Sum according to the saved client-to-attack map. Overall RR must not hide a
+and LIE according to the saved client-to-attack map. Overall RR must not hide a
 failure on one attack family.
 
 #### Aggregation and stability
@@ -169,20 +166,20 @@ delta; BN/LN-specific features are not used by the primary protocol.
 
 The two phases use independent selection-score fields:
 
-\[
+
+$$
 r_i = \operatorname{mean}_j |\hat{x}_{ij}-x_{ij}|,
 \qquad
 d_i = \lVert z_i-c\rVert_2^2.
-\]
-
+$$
 The primary schedule is `phase1_rounds = 15`, Phase 1 score=`recon`, and Phase 2
 score=`svdd`. In Phase 1 the AE is trained with reconstruction loss. In Phase 2
 the training objective is
-
-\[
+$$
 L_2 = \alpha L_{\mathrm{SVDD}} + (1-\alpha)L_{\mathrm{recon}},
 \qquad \alpha=0.5.
-\]
+$$
+
 
 `alpha` is a loss coefficient only. It does not weight the client-selection score
 and it does not change final aggregation weights. The `combined` score, used only
@@ -213,87 +210,85 @@ metadata, per-round selection scores, accepted IDs, normalized aggregation
 weights, candidate validation accuracies, and losses. Truncated or non-finite
 results are excluded before aggregation.
 
-## 4.2 Overall Defense Performance
+## 4.2 Overall Defense Performance and Malicious Client Detection
+
+This combined section reports global utility and malicious-client detection on
+the same dataset, partition, attack, defense, and seed slices. The two tables are
+kept as separate LaTeX deliverables because utility and detection answer different
+evaluation questions. The Markdown document contains only one placeholder link per table; no numerical result is inserted here until it is produced by a complete, parseable result file.
+
+### 4.2.1 Overall Defense Performance
 
 The primary matrix compares all eight canonical defenses on every supported attack
 and dataset. Results are grouped by dataset and partition; `none` is retained as a
-clean control. For image BD and M1, ASR is shown beside TACC. The intended claim is
-not merely high detection: the defense must preserve clean accuracy while lowering
-attack impact and avoiding excessive benign rejection.
+clean control. TACC is reported for every condition. For image BD and Mix, ASR is
+reported beside TACC; ASR is `N/A` for AG News and for non-backdoor attacks.
 
 **Table 1. Overall clean utility and attack suppression (mean +/- std).**
 
-| Dataset | Split | Attack | Metric | FedAvg | TM | Multi-Krum | LASA | FedSECA | BNGuard | FedDMC | AE-SVDD |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  |  |  | TACC |  |  |  |  |  |  |  |  |
-|  |  |  | ASR (image only) |  |  |  |  |  |  |  |  |
+[Table 1 (vertical LaTeX)](tables/table1.tex)
 
-Report a separate convergence plot for representative CIFAR-10 and AG News
-conditions, with seed standard-deviation bands. Do not infer a defense win from
-an accuracy collapse that happens to reduce ASR.
+Include with `\input{tables/table1.tex}`.
 
-## 4.3 Malicious Client Detection
+The vertical LaTeX table places attack/metric conditions in rows and defenses in columns
+so that it remains readable in portrait orientation; it uses a fixed-width `tabularx` layout; the file uses `sidewaystable` so the full vertical table remains readable in a portrait paper. Report a separate convergence
+plot for representative CIFAR-10 and AG News conditions, with seed
+standard-deviation bands. Do not infer a defense win from an accuracy collapse
+that happens to reduce ASR.
 
-Detection results are reported independently from global utility. Each row is
-paired by dataset, split, attack, and seed, and contains both score-based and
-decision-based metrics.
+### 4.2.2 Malicious Client Detection
 
-### 4.3.1 Individual Attacks
+Detection is evaluated independently from global utility. The accompanying LaTeX
+table follows the grouped layout of the supplied reference figure: each attack
+family has DAR, DPR, and RR subcolumns, with dataset blocks and detector rows.
+The table uses only the attack families defined by this document: LF, GN, SF, LIE,
+BD, and simultaneous Mix (M1). AG News has no image-trigger condition, so its BD
+and Mix cells are `N/A`.
 
-Run LF, GN, SF, LIE, Min-Max, Min-Sum, and BD separately with the primary 30% malicious-client
-setting. For each attack, show the score distribution over benign and malicious
-clients, accepted fraction, and per-round detection metrics. BD rows include ASR;
-AG News rows do not include image ASR.
+**Table 2. Malicious-client detection under individual and mixed attacks.**
 
-**Table 2. Individual-attack detection.**
+[Table 2 (LaTeX)](tables/table2.tex)
 
-| Dataset | Split | Attack | Defense | DAR | DPR | RR | FPR | F1 | AUROC | AUPRC | TACC | ASR |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |  |  |  |  |
+Include with `\input{tables/table2.tex}`.
 
-### 4.3.2 Mixed Attacks
+For individual attacks, report the score distribution over benign and malicious
+clients and the per-round decision metrics. For Mix, report overall RR and the
+attack-family recall obtained from the saved client-to-attack assignment map.
+The complete result analysis also retains FPR, F1, AUROC, AUPRC, TACC, ASR where
+applicable, accepted fraction, candidate validation accuracies, and losses; the
+compact Table 2 is not used to discard those diagnostics.
 
-Run M1 in the primary matrix and M2/M3 as mixed-attack supplements. Different
-malicious clients execute different attack modules in the same round. Report
-overall detection and attack-family recall, not just an average over attack types.
-
-**Table 3. Mixed-attack detection and utility.**
-
-| Dataset | Split | Mix | Defense | DAR | DPR | Overall RR | LF RR | BD RR | GN RR | SF RR | LIE RR | Min-Max RR | Min-Sum RR | FPR | TACC | ASR |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-
-## 4.4 Ablation Study
+## 4.3 Ablation Study
 
 All ablations keep the task, partition, seed, client count, attack parameters,
 validation size, and local training budget fixed. Only the named factor changes.
 
-### 4.4.1 Two-stage Architecture
+### 4.3.1 Two-stage Architecture
 
 The mechanism ablation compares the following configurations. The phrase
 “compactness error” means latent SVDD distance (d_i), not a residual of the
 FedAvg aggregation operation.
 
-| Configuration | Phase 1 | Phase 2 | Training objective | Purpose |
-| --- | --- | --- | --- | --- |
-| FedAvg | No filtering | No filtering | N/A | Attack-only control |
-| P1-only | All rounds ranked by (r_i) | Not entered | (L_{recon}) | Reconstruction mechanism boundary |
-| P2-only | Skipped (`phase1_rounds=0`) | All rounds ranked by (d_i) | α(L_{SVDD})+(1-α)(L_{recon}) | Early-center and no-warmup behavior |
-| Full | First 15 rounds ranked by (r_i) | Remaining rounds ranked by (d_i) | Phase-specific objectives above | Complementarity of the complete schedule |
+| Configuration | Phase 1                         | Phase 2                          | Training objective              | Purpose                                  |
+| ------------- | ------------------------------- | -------------------------------- | ------------------------------- | ---------------------------------------- |
+| FedAvg        | No filtering                    | No filtering                     | N/A                             | Attack-only control                      |
+| P1-only       | All rounds ranked by (r_i)      | Not entered                      | (L_{recon})                     | Reconstruction mechanism boundary        |
+| P2-only       | Skipped (`phase1_rounds=0`)     | All rounds ranked by (d_i)       | α(L_{SVDD})+(1-α)(L_{recon})    | Early-center and no-warmup behavior      |
+| Full          | First 15 rounds ranked by (r_i) | Remaining rounds ranked by (d_i) | Phase-specific objectives above | Complementarity of the complete schedule |
 
-Use the RQ3 runner with LF, GN, SF, LIE, Min-Max, Min-Sum, BD, and M1, ratios 10%, 20%, 30%, and
+Use the RQ3 runner with LF, GN, SF, LIE, BD, and M1, ratios 10%, 20%, 30%, and
 40%, plus a 0% clean control, and seeds 42--44. The default RQ3 runner uses 100 rounds for the
 mechanism screen; a selected configuration is confirmed for 300 rounds. Claim
 complementarity only when Full improves the same attack/ratio/seed comparison,
 not from a cross-condition average.
 
-**Table 4. Two-stage architecture ablation.**
+**Table 3. Two-stage architecture ablation.**
 
-| Malicious ratio | Attack | Configuration | TACC | ASR | RR | FPR | AUROC | AUPRC | Accepted fraction |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |  |
+| Malicious ratio | Attack | Configuration | TACC |  ASR |   RR |  FPR | AUROC | AUPRC | Accepted fraction |
+| --------------- | ------ | ------------- | ---: | ---: | ---: | ---: | ----: | ----: | ----------------: |
+|                 |        |               |      |      |      |      |       |       |                   |
 
-### 4.4.2 Phase-2 Detection Score
+### 4.3.2 Phase-2 Detection Score
 
 Keep Phase 1 fixed to reconstruction, `phase1_rounds=15`, and α=0.5. Compare the
 three supported Phase-2 scores:
@@ -303,16 +298,16 @@ three supported Phase-2 scores:
 - `combined`: average the rank-normalized (r_i) and (d_i).
 
 This is a score ablation, not a loss ablation. The loss remains the same for all
-three rows. Use 100-round screening over GN, SF, LIE, Min-Max, Min-Sum, BD, and M1, then repeat the
+three rows. Use 100-round screening over GN, SF, LIE, BD, and M1, then repeat the
 best mode on the 300-round primary protocol.
 
-**Table 5. Phase-2 score ablation.**
+**Table 4. Phase-2 score ablation.**
 
-| Dataset | Attack | Phase-2 score | TACC | ASR | RR | FPR | AUROC | AUPRC | Selected rejection ratio |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  | recon / combined / svdd |  |  |  |  |  |  |  |
+| Dataset | Attack | Phase-2 score           | TACC |  ASR |   RR |  FPR | AUROC | AUPRC | Selected rejection ratio |
+| ------- | ------ | ----------------------- | ---: | ---: | ---: | ---: | ----: | ----: | -----------------------: |
+|         |        | recon / combined / svdd |      |      |      |      |       |       |                          |
 
-### 4.4.3 Validation-driven Top-K Selection
+### 4.3.3 Validation-driven Top-K Selection
 
 The server does not expose a rejection ratio as a tunable run parameter. Instead,
 each round it evaluates the internal candidate set
@@ -333,13 +328,13 @@ candidate, and (iv) the final test TACC/ASR and detection metrics. This directly
 tests validation-driven selection without introducing a rejection-ratio
 hyperparameter.
 
-**Table 6. Validation-driven Top-K ablation.**
+**Table 5. Validation-driven Top-K ablation.**
 
-| Dataset | Attack | Selection rule | Candidate ρ | Validation TACC | Test TACC | ASR | RR | FPR |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  | validation-selected / fixed replay |  |  |  |  |  |  |
+| Dataset | Attack | Selection rule                     | Candidate ρ | Validation TACC | Test TACC |  ASR |   RR |  FPR |
+| ------- | ------ | ---------------------------------- | ----------: | --------------: | --------: | ---: | ---: | ---: |
+|         |        | validation-selected / fixed replay |             |                 |           |      |      |      |
 
-## 4.5 Parameter Sensitivity
+## 4.4 Parameter Sensitivity
 
 Sensitivity experiments vary one AE-SVDD factor at a time. The primary fixed
 configuration is descriptor dimension 4096, Phase 1 length 15, Phase-1 score
@@ -347,33 +342,33 @@ configuration is descriptor dimension 4096, Phase 1 length 15, Phase-1 score
 The screening budget is 100 rounds; the selected setting is re-run for 300 rounds
 with seeds 42--44 before being used in the primary claims.
 
-### 4.5.1 Loss Coefficient
+### 4.4.1 Loss Coefficient
 
 Sweep `alpha` in `{0.25, 0.50, 0.75}`. The endpoints 0 and 1 may be included as
 diagnostic pure-reconstruction and pure-SVDD controls, but are not needed for the
 main sensitivity claim. Keep selection scores fixed (`recon` then `svdd`) so this
 experiment changes only the Phase-2 training objective.
 
-**Table 7. Loss-coefficient sensitivity.**
+**Table 6. Loss-coefficient sensitivity.**
 
-| Dataset | Attack | α | TACC | ASR | RR | FPR | AUROC | AUPRC | SVDD loss | Recon loss |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |  |  |
+| Dataset | Attack |    α | TACC |  ASR |   RR |  FPR | AUROC | AUPRC | SVDD loss | Recon loss |
+| ------- | ------ | ---: | ---: | ---: | ---: | ---: | ----: | ----: | --------: | ---------: |
+|         |        |      |      |      |      |      |       |       |           |            |
 
-### 4.5.2 Phase-1 Duration
+### 4.4.2 Phase-1 Duration
 
 Sweep `phase1_rounds` in `{5, 15, 30, 50}` with total rounds fixed at 100 for
 screening. Phase 1 always uses reconstruction ranking and Phase 2 always uses
 SVDD ranking. This isolates how long the AE has to establish a reconstruction
 representation before the center-based score is activated.
 
-**Table 8. Phase-1 duration sensitivity.**
+**Table 7. Phase-1 duration sensitivity.**
 
-| Dataset | Attack | Phase-1 rounds | TACC | ASR | RR | FPR | Selected switch round | Runtime |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |
+| Dataset | Attack | Phase-1 rounds | TACC |  ASR |   RR |  FPR | Selected switch round | Runtime |
+| ------- | ------ | -------------: | ---: | ---: | ---: | ---: | --------------------: | ------: |
+|         |        |                |      |      |      |      |                       |         |
 
-### 4.5.3 Trusted Validation Set Size
+### 4.4.3 Trusted Validation Set Size
 
 Vary the direct sample count `server_validation_size` in `{10, 25, 50, 100,
 200}`. Each set remains clean, stratified, and withheld from clients. The primary
@@ -381,81 +376,80 @@ value is 50 samples; it is not 50 groups multiplied by a batch size. Keep the
 candidate rejection grid and tie rule unchanged so only validation reliability
 changes.
 
-**Table 9. Trusted-validation-set sensitivity.**
+**Table 8. Trusted-validation-set sensitivity.**
 
-| Dataset | Attack | Validation samples | TACC | ASR | RR | FPR | Candidate-choice agreement | Runtime |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |
+| Dataset | Attack | Validation samples | TACC |  ASR |   RR |  FPR | Candidate-choice agreement | Runtime |
+| ------- | ------ | -----------------: | ---: | ---: | ---: | ---: | -------------------------: | ------: |
+|         |        |                    |      |      |      |      |                            |         |
 
-## 4.6 Robustness Analysis
+## 4.5 Robustness Analysis
 
 Robustness factors are environment or attacker factors, not AE-SVDD training
 hyperparameters. Unless stated otherwise, use the 300-round primary schedule and
 report the final-10-round mean with three seeds.
 
-### 4.6.1 Malicious Client Ratio
+### 4.5.1 Malicious Client Ratio
 
 Use malicious ratios 10%, 20%, 30%, and 40%, with a 0% clean control. Keep
 `num_clients=100` and adjust `num_malicious` so the benign-majority assumption is
 explicit. A 50% boundary point may be shown separately, but it is not part of the
 main robustness average or a claim under the benign-majority assumption.
 
-**Table 10. Malicious-ratio robustness.**
+**Table 9. Malicious-ratio robustness.**
 
-| Dataset | Attack | Malicious ratio | TACC | ASR | RR | FPR | AUROC | AUPRC |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |
+| Dataset | Attack | Malicious ratio | TACC |  ASR |   RR |  FPR | AUROC | AUPRC |
+| ------- | ------ | --------------: | ---: | ---: | ---: | ---: | ----: | ----: |
+|         |        |                 |      |      |      |      |       |       |
 
-### 4.6.2 Data Heterogeneity
+### 4.5.2 Data Heterogeneity
 
 Compare IID (`dirichlet_alpha=null`), Dirichlet α=1.0, α=0.5, and α=0.1 with
 100 clients and 30% malicious clients. Report benign FPR separately from malicious
 RR to reveal whether normal client drift is being rejected.
 
-**Table 11. Data-heterogeneity robustness.**
+**Table 10. Data-heterogeneity robustness.**
 
-| Dataset | Dirichlet α | Attack | TACC | ASR | RR | FPR |
-| --- | ---: | --- | ---: | ---: | ---: | ---: |
-|  | IID / 1.0 / 0.5 / 0.1 |  |  |  |  |  |
+| Dataset |           Dirichlet α | Attack | TACC |  ASR |   RR |  FPR |
+| ------- | --------------------: | ------ | ---: | ---: | ---: | ---: |
+|         | IID / 1.0 / 0.5 / 0.1 |        |      |      |      |      |
 
-### 4.6.3 Number of Clients
+### 4.5.3 Number of Clients
 
 Set (K\in\{50,100,200\}), keep the malicious ratio at 30%, and scale the
 malicious count with K. Keep the local batch and round budget unchanged. Report
 both quality and wall-clock scaling; do not attribute a change caused by a
 different attacker ratio to client scale.
 
-**Table 12. Client-scale robustness and scaling.**
+**Table 11. Client-scale robustness and scaling.**
 
-| Clients K | Malicious clients | Attack | TACC | ASR | RR | FPR | Runtime | Peak memory |
-| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |
+| Clients K | Malicious clients | Attack | TACC |  ASR |   RR |  FPR | Runtime | Peak memory |
+| --------: | ----------------: | ------ | ---: | ---: | ---: | ---: | ------: | ----------: |
+|           |                   |        |      |      |      |      |         |             |
 
-### 4.6.4 Attack Intensity
+### 4.5.4 Attack Intensity
 
 Vary one attack-specific strength at a time while keeping all other settings
 fixed. The following grid gives interpretable weak-to-strong points:
 
-| Attack | Parameter | Values |
-| --- | --- | --- |
-| GN | `gaussian_sigma` | 0.1, 0.3, 0.5, 1.0 |
-| SF | `sign_flip_scale` | 0.25, 0.5, 1.0, 2.0 |
-| LIE | `lie_z_override` | 0.2, 0.524, 0.8, 1.0 |
-| Min-Max / Min-Sum | `distance_attack_deviation` | `std` (primary), `sign`, `unit_vec` |
-| BD | `backdoor_poison_ratio` | 0.2, 0.4, 0.6, 0.8 |
-| BD | `backdoor_model_replace_scale` | 1.0, 2.0, 3.0, 5.0 |
+| Attack | Parameter                      | Values               |
+| ------ | ------------------------------ | -------------------- |
+| GN     | `gaussian_sigma`               | 0.1, 0.3, 0.5, 1.0   |
+| SF     | `sign_flip_scale`              | 0.25, 0.5, 1.0, 2.0  |
+| LIE    | `lie_z_override`               | 0.2, 0.524, 0.8, 1.0 |
+| BD     | `backdoor_poison_ratio`        | 0.2, 0.4, 0.6, 0.8   |
+| BD     | `backdoor_model_replace_scale` | 1.0, 2.0, 3.0, 5.0   |
 
 For each attack, report attack success (ASR where applicable), TACC, RR, and FPR
 on an independent horizontal axis. This distinguishes an attack that never
  succeeds from a successful attack that the defense suppresses.
 
-**Table 13. Attack-intensity robustness.**
+**Table 12. Attack-intensity robustness.**
 
-| Dataset | Attack | Intensity parameter | Value | TACC | ASR | RR | FPR |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |
+| Dataset | Attack | Intensity parameter | Value | TACC |  ASR |   RR |  FPR |
+| ------- | ------ | ------------------- | ----: | ---: | ---: | ---: | ---: |
+|         |        |                     |       |      |      |      |      |
 
-## 4.7 Computational Overhead
+## 4.6 Computational Overhead
 
 Measure overhead on the same hardware, software environment, client count, round
 count, and worker schedule. Each measurement excludes dataset download and is
@@ -468,11 +462,11 @@ For AE-SVDD, validation evaluation is repeated once per internal candidate ratio
 this cost is part of the method and must not be omitted. JSON and JSONL result
 sizes are reported as storage overhead, not GPU time.
 
-**Table 14. Computational overhead.**
+**Table 13. Computational overhead.**
 
 | Dataset | Defense | Clients | Rounds | Wall time | Time/round | Peak GPU memory | Throughput (clients/s) | Result size |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-|  |  |  |  |  |  |  |  |  |
+| ------- | ------- | ------: | -----: | --------: | ---------: | --------------: | ---------------------: | ----------: |
+|         |         |         |        |           |            |                 |                        |             |
 
 All conclusions must be made from complete, parseable result files with the
 expected round count. Incomplete runs, non-finite feature failures, OOM traces,
