@@ -226,12 +226,10 @@ reported beside TACC; ASR is `N/A` for AG News and for non-backdoor attacks.
 
 **Table 1. Overall clean utility and attack suppression (mean +/- std).**
 
-[Table 1 (vertical LaTeX)](tables/table1.tex)
-
-Include with `\input{tables/table1.tex}`.
+**LaTeX placeholder:** `\input{tables/table1.tex}`
 
 The vertical LaTeX table places attack/metric conditions in rows and defenses in columns
-so that it remains readable in portrait orientation; it uses a fixed-width `tabularx` layout; the file uses `sidewaystable` so the full vertical table remains readable in a portrait paper. Report a separate convergence
+so that it remains readable in portrait orientation; it uses a fixed-width `tabular` layout scaled to the text width. Report a separate convergence
 plot for representative CIFAR-10 and AG News conditions, with seed
 standard-deviation bands. Do not infer a defense win from an accuracy collapse
 that happens to reduce ASR.
@@ -247,9 +245,7 @@ and Mix cells are `N/A`.
 
 **Table 2. Malicious-client detection under individual and mixed attacks.**
 
-[Table 2 (LaTeX)](tables/table2.tex)
-
-Include with `\input{tables/table2.tex}`.
+**LaTeX placeholder:** `\input{tables/table2.tex}`
 
 For individual attacks, report the score distribution over benign and malicious
 clients and the per-round decision metrics. For Mix, report overall RR and the
