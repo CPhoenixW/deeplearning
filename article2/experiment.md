@@ -215,7 +215,7 @@ results are excluded before aggregation.
 This combined section reports global utility and malicious-client detection on
 the same dataset, partition, attack, defense, and seed slices. The two tables are
 kept as separate LaTeX deliverables because utility and detection answer different
-evaluation questions. The Markdown document contains only one placeholder link per table; no numerical result is inserted here until it is produced by a complete, parseable result file.
+evaluation questions. The Markdown document contains only one placeholder per table; no numerical result is inserted here until it is produced by a complete, parseable result file.
 
 ### 4.2.1 Overall Defense Performance
 
