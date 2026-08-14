@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run the RQ3 mechanism ablation matrix.
 
-RQ3 compares FedAvg, P1-only, P2-only, and the full two-stage mechanism while
-varying the malicious-client ratio.  The runner keeps the Phase 2 score and
-loss coefficient fixed so mechanism and score/loss ablations are not mixed.
+RQ3 compares P1-only, P2-only, and the full two-stage mechanism while varying
+the malicious-client ratio. The runner keeps the score schedule and loss
+coefficient fixed so this matrix contains only the three requested schedules.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ from typing import Any, Iterable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MECHANISMS = ("fedavg", "p1_only", "p2_only", "full")
-DEFAULT_ATTACKS = ("gn", "lie", "minmax", "minsum", "bd", "mix")
+MECHANISMS = ("p1_only", "p2_only", "full")
+DEFAULT_ATTACKS = ("lf", "gn", "sf", "bd")
 DEFAULT_RATIOS = (0.10, 0.20, 0.30, 0.40)
-DEFAULT_SEEDS = (42,)
+DEFAULT_SEEDS = (42, 43, 44)
 
 BASE_OVERRIDES: dict[str, Any] = {
     "num_clients": 100,
@@ -61,7 +61,7 @@ BASE_OVERRIDES: dict[str, Any] = {
     "phase2_recon_quantile": 0.8,
     "svdd_feature_clip": 10.0,
     "phase1_score_mode": "recon",
-    "phase2_score_mode": "svdd",
+    "phase2_score_mode": "combined",
     "alpha": 0.5,
     "device": "cuda",
 }
@@ -82,14 +82,27 @@ def _parse_ratios(value: str) -> tuple[float, ...]:
 
 
 def _mechanism_overrides(mechanism: str, rounds: int) -> dict[str, Any]:
-    if mechanism == "fedavg":
-        return {"defense": "avg", "phase1_rounds": 15}
     if mechanism == "p1_only":
-        return {"defense": "svdd", "phase1_rounds": int(rounds)}
+        return {
+            "defense": "svdd",
+            "phase1_rounds": int(rounds),
+            "phase1_score_mode": "recon",
+            "phase2_score_mode": "recon",
+        }
     if mechanism == "p2_only":
-        return {"defense": "svdd", "phase1_rounds": 0}
+        return {
+            "defense": "svdd",
+            "phase1_rounds": 0,
+            "phase1_score_mode": "recon",
+            "phase2_score_mode": "combined",
+        }
     if mechanism == "full":
-        return {"defense": "svdd", "phase1_rounds": 15}
+        return {
+            "defense": "svdd",
+            "phase1_rounds": 15,
+            "phase1_score_mode": "recon",
+            "phase2_score_mode": "combined",
+        }
     raise ValueError(f"Unknown RQ3 mechanism: {mechanism}")
 
 
@@ -137,6 +150,18 @@ def _complete(
     if not isinstance(effective, dict):
         return False
     expected_defense = _mechanism_overrides(mechanism, rounds)["defense"]
+    expected_overrides = _mechanism_overrides(mechanism, rounds)
+    score_modes_match = True
+    if mechanism in {"p1_only", "full"}:
+        score_modes_match = (
+            str(effective.get("phase1_score_mode", ""))
+            == str(expected_overrides["phase1_score_mode"])
+        )
+    if mechanism in {"p2_only", "full"}:
+        score_modes_match = score_modes_match and (
+            str(effective.get("phase2_score_mode", ""))
+            == str(expected_overrides["phase2_score_mode"])
+        )
     expected_malicious = int(round(100 * ratio))
     if attack == "none":
         expected_malicious = 0
@@ -147,9 +172,8 @@ def _complete(
         and int(meta.get("total_rounds", -1)) == int(rounds)
         and int(effective.get("seed", -1)) == int(seed)
         and int(effective.get("phase1_rounds", -1))
-        == int(_mechanism_overrides(mechanism, rounds)["phase1_rounds"])
-        and str(effective.get("phase1_score_mode", "")) == "recon"
-        and str(effective.get("phase2_score_mode", "")) == "svdd"
+        == int(expected_overrides["phase1_rounds"])
+        and score_modes_match
         and abs(float(effective.get("alpha", -1.0)) - 0.5) < 1e-8
         and int(effective.get("num_clients", -1)) - int(effective.get("num_benign", -1))
         == expected_malicious

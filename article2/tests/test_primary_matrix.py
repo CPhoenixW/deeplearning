@@ -28,11 +28,28 @@ def test_primary_matrix_has_816_jobs_and_ag_news_restriction(tmp_path) -> None:
     payload = json.loads(Path(sample.config_path).read_text(encoding="utf-8"))
     overrides = payload["fed_config_overrides"]
     assert overrides["phase1_score_mode"] == "recon"
-    assert overrides["phase2_score_mode"] == "svdd"
+    assert overrides["phase2_score_mode"] == "combined"
     assert overrides["alpha"] == 0.5
     assert "lie_z_override" not in overrides
     assert overrides["mixed_attack_types"] == "lf,bd,gn,sf,lie,minmax,minsum"
     assert overrides["total_rounds"] == 12
+
+
+def test_primary_matrix_rewrites_stale_score_protocol(tmp_path) -> None:
+    root = tmp_path / "primary"
+    jobs = write_matrix(root, rounds=12)
+    sample = next(job for job in jobs if job.task == "cifar10" and job.attack == "lie")
+    config_path = Path(sample.config_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["fed_config_overrides"]["phase2_score_mode"] = "svdd"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    write_matrix(root, rounds=12)
+
+    refreshed = json.loads(config_path.read_text(encoding="utf-8"))
+    assert refreshed["fed_config_overrides"]["phase2_score_mode"] == "combined"
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["protocol"] == "article2-primary-v2-combined-phase2"
 
 
 def test_stage0_matrix_covers_four_tasks_and_primary_defenses(tmp_path) -> None:

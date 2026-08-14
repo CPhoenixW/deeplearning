@@ -42,7 +42,7 @@ BASE_OVERRIDES: dict[str, Any] = {
     "dirichlet_alpha": 1.0,
     "phase1_rounds": 15,
     "phase1_score_mode": "recon",
-    "phase2_score_mode": "svdd",
+    "phase2_score_mode": "combined",
     "alpha": 0.5,
     "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
     "param_descriptor_dim": 4096,
@@ -78,9 +78,6 @@ def write_matrix(root: Path, *, rounds: int = 300, force: bool = False) -> list[
         relative = Path(task) / attack / defense / f"seed_{seed}"
         log_dir = root / relative
         config_path = configs_root / relative.with_suffix(".json")
-        if config_path.exists() and not force:
-            jobs.append(MatrixJob(task, attack, defense, seed, str(config_path), str(log_dir)))
-            continue
         overrides = dict(BASE_OVERRIDES)
         overrides.update({"seed": seed, "total_rounds": int(rounds)})
         payload = {
@@ -92,14 +89,23 @@ def write_matrix(root: Path, *, rounds: int = 300, force: bool = False) -> list[
             "hyperparameters_file": "configs/hyperparameters.json",
             "fed_config_overrides": overrides,
         }
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        existing: dict[str, Any] | None = None
+        if config_path.exists() and not force:
+            try:
+                loaded = json.loads(config_path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (OSError, ValueError, json.JSONDecodeError):
+                existing = None
+        if existing != payload:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
         jobs.append(MatrixJob(task, attack, defense, seed, str(config_path), str(log_dir)))
     manifest = {
-        "protocol": "article2-primary-v1",
+        "protocol": "article2-primary-v2-combined-phase2",
         "rounds": int(rounds),
         "tasks": list(IMAGE_TASKS + ("ag_news",)),
         "image_attacks": list(IMAGE_ATTACKS),

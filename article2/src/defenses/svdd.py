@@ -210,8 +210,8 @@ class SVDDDefense(BaseDefense):
     ) -> Tuple[Tensor, Tensor, float, float, Dict[str, float]]:
         """Choose a Top-K mask by clean validation accuracy.
 
-        ``scores`` preserve the original phase-specific ranking: reconstruction
-        loss in Phase 1 and SVDD distance in Phase 2.  Only the cutoff changes.
+        ``scores`` preserve the configured phase-specific ranking (reconstruction,
+        SVDD distance, or their combined rank score). Only the cutoff changes.
         """
         if scores.ndim != 1 or scores.numel() != len(client_state_dicts):
             raise ValueError("Top-K scores must match the client count.")

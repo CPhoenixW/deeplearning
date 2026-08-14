@@ -240,7 +240,7 @@ def prepare_datasets(manifest: Dict[str, Any]) -> None:
         task = get_task(config)
         config.num_classes = task.num_classes
         print(f"PREPARE {task_name} data_root={config.data_root}")
-        client_loaders, test_loader = task.build_dataloaders(config)
+        client_loaders, _validation_loader, test_loader = task.build_dataloaders(config)
         train_samples = sum(len(loader.dataset) for loader in client_loaders)
         print(
             f"READY   {task_name} train={train_samples} "

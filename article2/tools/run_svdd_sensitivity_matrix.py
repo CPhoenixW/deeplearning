@@ -15,6 +15,7 @@ import os
 import queue
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -27,13 +28,13 @@ DEFAULT_SEEDS = (42, 43, 44)
 DEFAULT_ATTACKS = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
 DEFAULT_ALPHA = 0.5
 
-# Fashion-MNIST calibration and the C002-derived defense/runtime protocol.
+# AG News rank-1 calibration and the C002-derived defense/runtime protocol.
 BASE_OVERRIDES: dict[str, Any] = {
     "num_clients": 100,
     "total_rounds": 100,
     "client_lr": 0.1,
     "client_momentum": 0.9,
-    "client_weight_decay": 0.0,
+    "client_weight_decay": 0.0005,
     "local_epochs": 1,
     "batch_size": 64,
     "num_workers": 0,
@@ -42,9 +43,9 @@ BASE_OVERRIDES: dict[str, Any] = {
     "cuda_aggregation": True,
     "reuse_client_model": True,
     "skip_redundant_attack_training": True,
-    "client_batch_group_size": 2,
+    "client_batch_group_size": 5,
     "round_diagnostics": False,
-    "dirichlet_alpha": 1.0,
+    "dirichlet_alpha": None,
     "hf_datasets_offline": True,
     "mixed_attack_types": "lf,bd,gn",
     "latent_dim": 64,
@@ -268,6 +269,12 @@ def main() -> int:
     parser.add_argument("--workers-per-gpu", type=int, default=12)
     parser.add_argument("--omp-threads", type=int, default=1)
     parser.add_argument(
+        "--time-limit-hours",
+        type=float,
+        default=None,
+        help="Shared hard wall-clock limit; active child runs are killed at the deadline.",
+    )
+    parser.add_argument(
         "--clean-reference-ratio",
         type=float,
         default=0.30,
@@ -297,6 +304,8 @@ def main() -> int:
         parser.error("each phase1 round count must be less than total rounds")
     if args.workers_per_gpu < 1 or args.omp_threads < 1:
         parser.error("workers-per-gpu and omp-threads must be positive")
+    if args.time_limit_hours is not None and args.time_limit_hours <= 0.0:
+        parser.error("time-limit-hours must be positive")
     if "none" in attacks and not any(
         abs(float(ratio) - float(args.clean_reference_ratio)) <= 1e-9
         for ratio in ratios
@@ -328,7 +337,8 @@ def main() -> int:
     )
     print(
         f"jobs={len(jobs)} expected={total_expected} task={args.task} rounds={args.rounds} "
-        f"gpus={list(gpus)} workers_per_gpu={args.workers_per_gpu} omp_threads={args.omp_threads}"
+        f"gpus={list(gpus)} workers_per_gpu={args.workers_per_gpu} omp_threads={args.omp_threads} "
+        f"time_limit_hours={args.time_limit_hours}"
     )
     for factor, attack, config_path, _out, _p1, _ratio, _mode, seed in jobs[:80]:
         print(f"PENDING seed={seed} factor={factor} attack={attack} config={config_path}")
@@ -343,9 +353,21 @@ def main() -> int:
     failures: list[tuple[str, str, int, Path]] = []
     lock = threading.Lock()
     python_bin = str(args.python_bin)
+    deadline = (
+        time.monotonic() + 3600.0 * float(args.time_limit_hours)
+        if args.time_limit_hours is not None
+        else None
+    )
+    deadline_reached = threading.Event()
 
     def worker(gpu: int, worker_id: int) -> None:
         while True:
+            if deadline_reached.is_set():
+                return
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0.0:
+                deadline_reached.set()
+                return
             try:
                 factor, attack, config_path, output_dir, _p1, _ratio, _mode, seed = pending.get_nowait()
             except queue.Empty:
@@ -361,21 +383,38 @@ def main() -> int:
                     "MKL_NUM_THREADS": str(int(args.omp_threads)),
                     "OPENBLAS_NUM_THREADS": str(int(args.omp_threads)),
                     "PYTHONUNBUFFERED": "1",
+                    # These must be set before ``datasets`` is imported.  The
+                    # task-level config switch is otherwise too late to stop
+                    # one failed HuggingFace HEAD request per worker.
+                    "HF_DATASETS_OFFLINE": "1",
+                    "TRANSFORMERS_OFFLINE": "1",
                 }
             )
             command = [python_bin, "-u", "-m", "src.pipeline", "--config", str(config_path)]
             with lock:
                 print(f"START gpu={gpu} worker={worker_id} seed={seed} factor={factor} attack={attack}", flush=True)
             with console_path.open("a", encoding="utf-8") as console:
-                completed = subprocess.run(
-                    command,
-                    cwd=str(PROJECT_ROOT),
-                    env=env,
-                    stdout=console,
-                    stderr=subprocess.STDOUT,
-                    check=False,
-                    start_new_session=True,
-                )
+                try:
+                    completed = subprocess.run(
+                        command,
+                        cwd=str(PROJECT_ROOT),
+                        env=env,
+                        stdout=console,
+                        stderr=subprocess.STDOUT,
+                        check=False,
+                        start_new_session=True,
+                        timeout=remaining,
+                    )
+                except subprocess.TimeoutExpired:
+                    deadline_reached.set()
+                    with lock:
+                        failures.append((factor, attack, 124, console_path))
+                        print(
+                            f"TIMEOUT seed={seed} factor={factor} attack={attack} log={console_path}",
+                            flush=True,
+                        )
+                    pending.task_done()
+                    return
             with lock:
                 if completed.returncode == 0:
                     print(f"DONE  seed={seed} factor={factor} attack={attack}", flush=True)

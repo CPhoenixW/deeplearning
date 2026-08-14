@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "name": "ag_news_4gpu_validation_300r",
+  "tasks": [
+    "ag_news"
+  ],
+  "client_lrs": [
+    0.005,
+    0.01,
+    0.03,
+    0.05,
+    0.1
+  ],
+  "client_weight_decays": [
+    0.0,
+    0.0001,
+    0.0005,
+    0.001
+  ],
+  "seeds": [
+    42
+  ],
+  "gpus": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "workers_per_gpu": 3,
+  "cpu_threads_per_worker": 8,
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "generated_config_dir": "configs/ag_news_4gpu_generated_300r",
+  "output_root": "log/ag_news_4gpu_validation_300r",
+  "selection_file": "log/ag_news_4gpu_validation_300r/selection.json",
+  "score_last_n_rounds": 10,
+  "common_overrides": {
+    "num_clients": 100,
+    "num_malicious": 0,
+    "total_rounds": 300,
+    "client_momentum": 0.9,
+    "local_epochs": 1,
+    "batch_size": 64,
+    "num_workers": 0,
+    "use_amp": false,
+    "channels_last": false,
+    "cuda_aggregation": true,
+    "reuse_client_model": true,
+    "client_batch_group_size": 5,
+    "round_diagnostics": false,
+    "dirichlet_alpha": null,
+    "hf_datasets_offline": true
+  },
+  "prepare_data_overrides": {
+    "hf_datasets_offline": false
+  }
+}
