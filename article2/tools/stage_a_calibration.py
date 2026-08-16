@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SUPPORTED_TASKS = {"mnist", "fashion_mnist", "cifar10", "ag_news"}
+SUPPORTED_TASKS = {"mnist", "fashion_mnist", "cifar10", "covid19", "ag_news"}
 
 
 def _load_object(path: Path) -> Dict[str, Any]:
@@ -272,7 +272,10 @@ def _is_complete(trial: Trial, expected_rounds: int) -> bool:
         and meta.get("defense") == "avg"
         and len(rounds) == expected_rounds
         and int(meta.get("total_rounds", -1)) == expected_rounds
-        and all(effective.get(key) == value for key, value in expected_effective.items())
+        and all(
+            effective.get(key, meta.get(key)) == value
+            for key, value in expected_effective.items()
+        )
     )
 
 
@@ -410,10 +413,17 @@ def select_candidates(
     allow_incomplete: bool = False,
 ) -> Dict[str, Any]:
     last_n = int(manifest.get("score_last_n_rounds", 10))
+    expected_rounds = int(manifest["common_overrides"]["total_rounds"])
     expected_seeds = {int(seed) for seed in manifest["seeds"]}
     grouped: Dict[Tuple[str, float, float], Dict[int, float]] = {}
     missing: List[str] = []
     for trial in trials:
+        complete_result = _is_complete(trial, expected_rounds)
+        if not complete_result and not allow_incomplete:
+            missing.append(
+                f"{trial.result_path}: missing, incomplete, or stale effective config"
+            )
+            continue
         if not trial.result_path.exists():
             missing.append(str(trial.result_path))
             continue
@@ -570,7 +580,7 @@ def main() -> None:
     subparsers.add_parser("plan", help="Print the validated trial plan")
     subparsers.add_parser(
         "prepare-data",
-        help="Download/cache all four datasets serially before multi-GPU execution",
+        help="Download/cache or validate all configured datasets before multi-GPU execution",
     )
 
     run_parser = subparsers.add_parser(

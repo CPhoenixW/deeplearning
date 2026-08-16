@@ -1,0 +1,13 @@
+{
+  "task": "covid19",
+  "attacks": "none,lf,gn,sf,lie,minmax,minsum,bd,mix",
+  "defenses": "avg,tm,mk,lasa,seca,bnguard,dmc,svdd",
+  "log_dir": "log/covid19",
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "fed_config_overrides": {
+    "server_validation_size": 50,
+    "batch_size": 64,
+    "num_workers": 0
+  }
+}

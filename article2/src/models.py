@@ -87,6 +87,41 @@ def fashion_mnist_cnn(num_classes: int = 10) -> nn.Module:
     return FashionCNN(num_classes=num_classes)
 
 
+class Covid19CNN(nn.Module):
+    """Lightweight four-convolution classifier for 128x128 grayscale X-rays."""
+
+    def __init__(self, num_classes: int = 4) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(p=0.25),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.classifier(self.features(x))
+
+
+def covid19_cnn(num_classes: int = 4) -> nn.Module:
+    """Build the COVID-19 Radiography 128x128 backbone."""
+
+    return Covid19CNN(num_classes=num_classes)
+
+
 def build_resnet18(num_classes: int = 10) -> nn.Module:
     """Backward-compatible alias: same as ``resnet18_cifar10``."""
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Dict, List, Tuple, Type
 
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, transforms
 _HF_DATASETS_IMPORT_ERROR = None
@@ -19,10 +21,22 @@ except Exception as e:
 
 try:
     from .config import FedConfig
-    from .models import ag_news_classifier, fashion_mnist_cnn, lenet_grayscale, resnet18_cifar10
+    from .models import (
+        ag_news_classifier,
+        covid19_cnn,
+        fashion_mnist_cnn,
+        lenet_grayscale,
+        resnet18_cifar10,
+    )
 except ImportError:
     from config import FedConfig
-    from models import ag_news_classifier, fashion_mnist_cnn, lenet_grayscale, resnet18_cifar10
+    from models import (
+        ag_news_classifier,
+        covid19_cnn,
+        fashion_mnist_cnn,
+        lenet_grayscale,
+        resnet18_cifar10,
+    )
 
 
 SERVER_VALIDATION_BATCH_SIZE = 64
@@ -183,6 +197,179 @@ class MnistTask(FederatedTask):
         train_dataset: Dataset = datasets.MNIST(root=root, train=True, download=True, transform=transform_train)
         validation_dataset: Dataset = datasets.MNIST(root=root, train=True, download=True, transform=transform_test)
         test_dataset: Dataset = datasets.MNIST(root=root, train=False, download=True, transform=transform_test)
+        return _split_train_test_loaders(
+            config, train_dataset, validation_dataset, test_dataset, self.num_classes
+        )
+
+
+COVID19_CLASS_TO_INDEX: Dict[str, int] = {
+    "COVID": 0,
+    "Lung_Opacity": 1,
+    "Normal": 2,
+    "Viral_Pneumonia": 3,
+}
+COVID19_SPLIT_SEED = 42
+
+_COVID19_SOURCE_DIRS: Dict[str, Tuple[str, ...]] = {
+    "COVID": ("COVID",),
+    "Lung_Opacity": ("Lung_Opacity", "Lung Opacity"),
+    "Normal": ("Normal",),
+    "Viral_Pneumonia": ("Viral Pneumonia", "Viral_Pneumonia"),
+}
+
+_COVID19_IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
+
+
+def _has_covid19_class_dirs(root: Path) -> bool:
+    return all(
+        any((root / directory).is_dir() for directory in source_dirs)
+        for source_dirs in _COVID19_SOURCE_DIRS.values()
+    )
+
+
+def _resolve_covid19_root(config: FedConfig) -> str:
+    data_root = Path(config.data_root).expanduser()
+    candidates = (
+        data_root / "covid19" / "COVID-19_Radiography_Dataset",
+        data_root / "COVID-19_Radiography_Dataset",
+        data_root / "covid19",
+    )
+    for candidate in candidates:
+        if _has_covid19_class_dirs(candidate):
+            return str(candidate)
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(
+        "COVID-19 Radiography Database was not found. Expected all four class "
+        f"directories under one of: {searched}"
+    )
+
+
+def scan_covid19_records(root: str | Path) -> List[Tuple[str, int]]:
+    """Return image paths with the protocol's fixed class-to-index mapping."""
+
+    dataset_root = Path(root)
+    if not _has_covid19_class_dirs(dataset_root):
+        raise FileNotFoundError(
+            f"Missing COVID-19 Radiography class directories under {dataset_root}"
+        )
+    records: List[Tuple[str, int]] = []
+    for class_name, label in COVID19_CLASS_TO_INDEX.items():
+        aliases = _COVID19_SOURCE_DIRS[class_name]
+        class_dir = next(
+            dataset_root / alias
+            for alias in aliases
+            if (dataset_root / alias).is_dir()
+        )
+        image_root = class_dir / "images" if (class_dir / "images").is_dir() else class_dir
+        paths = sorted(
+            path
+            for path in image_root.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in _COVID19_IMAGE_SUFFIXES
+            and "masks" not in {part.lower() for part in path.parts}
+        )
+        if not paths:
+            raise FileNotFoundError(
+                f"No radiographs found for class {class_name!r} in {image_root}"
+            )
+        records.extend((str(path), label) for path in paths)
+    return records
+
+
+def _stratified_train_test_indices(
+    labels: torch.Tensor,
+    *,
+    num_classes: int,
+    seed: int,
+    train_fraction: float = 0.8,
+) -> Tuple[List[int], List[int]]:
+    """Build deterministic per-class train/test indices without rebalancing."""
+
+    if not 0.0 < float(train_fraction) < 1.0:
+        raise ValueError("train_fraction must be between 0 and 1")
+    generator = torch.Generator().manual_seed(int(seed) + 130363)
+    train_indices: List[int] = []
+    test_indices: List[int] = []
+    for cls in range(int(num_classes)):
+        available = torch.where(labels == cls)[0]
+        if int(available.numel()) < 2:
+            raise ValueError(f"Class {cls} needs at least two images for an 80/20 split")
+        order = available[torch.randperm(int(available.numel()), generator=generator)]
+        train_count = int(float(train_fraction) * int(available.numel()))
+        train_count = min(max(train_count, 1), int(available.numel()) - 1)
+        train_indices.extend(int(index) for index in order[:train_count].tolist())
+        test_indices.extend(int(index) for index in order[train_count:].tolist())
+    train_order = torch.randperm(len(train_indices), generator=generator).tolist()
+    test_order = torch.randperm(len(test_indices), generator=generator).tolist()
+    return (
+        [train_indices[index] for index in train_order],
+        [test_indices[index] for index in test_order],
+    )
+
+
+class Covid19RadiographyDataset(Dataset):
+    """Map-style X-ray dataset backed by explicit ``(path, label)`` records."""
+
+    def __init__(self, records: List[Tuple[str, int]], transform) -> None:
+        self.records = list(records)
+        self.targets = [int(label) for _path, label in self.records]
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
+        path, label = self.records[index]
+        with Image.open(path) as source:
+            image = source.convert("L")
+        return self.transform(image), int(label)
+
+
+class Covid19Task(FederatedTask):
+    name = "covid19"
+    num_classes = 4
+
+    def data_subdir(self, config: FedConfig) -> str:
+        return _resolve_covid19_root(config)
+
+    def build_model(self) -> torch.nn.Module:
+        return covid19_cnn(num_classes=self.num_classes)
+
+    def build_dataloaders(
+        self, config: FedConfig
+    ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
+        transform_train = transforms.Compose(
+            [
+                transforms.Resize((128, 128)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+            ]
+        )
+        transform_test = transforms.Compose(
+            [
+                transforms.Resize((128, 128)),
+                transforms.ToTensor(),
+            ]
+        )
+        records = scan_covid19_records(self.data_subdir(config))
+        labels = torch.tensor([label for _path, label in records], dtype=torch.long)
+        train_indices, test_indices = _stratified_train_test_indices(
+            labels,
+            num_classes=self.num_classes,
+            seed=COVID19_SPLIT_SEED,
+            train_fraction=0.8,
+        )
+        train_records = [records[index] for index in train_indices]
+        test_records = [records[index] for index in test_indices]
+        train_dataset: Dataset = Covid19RadiographyDataset(
+            train_records, transform_train
+        )
+        validation_dataset: Dataset = Covid19RadiographyDataset(
+            train_records, transform_test
+        )
+        test_dataset: Dataset = Covid19RadiographyDataset(
+            test_records, transform_test
+        )
         return _split_train_test_loaders(
             config, train_dataset, validation_dataset, test_dataset, self.num_classes
         )
@@ -559,6 +746,7 @@ def _validation_indices(
 
 TASK_REGISTRY: Dict[str, Type[FederatedTask]] = {
     "cifar10": Cifar10Task,
+    "covid19": Covid19Task,
     "mnist": MnistTask,
     "fashion_mnist": FashionMnistTask,
     "ag_news": AGNewsTask,

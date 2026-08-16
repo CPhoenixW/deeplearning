@@ -193,7 +193,7 @@ class FedConfig:
     svdd_feature_clip: float = 10.0
 
     # --- Task (dataset + backbone) ---
-    # task_name keys must exist in tasks.TASK_REGISTRY, e.g. "cifar10", "fashion_mnist", "ag_news"
+    # task_name keys must exist in tasks.TASK_REGISTRY, e.g. "cifar10", "covid19", "ag_news"
     task_name: str = "cifar10"
     # Optional AG News feature fallback, used only when svdd_feature_mode="task".
     # The default fixed descriptor does not read this field.
@@ -206,6 +206,7 @@ class FedConfig:
     device: str = "auto"  # "auto" | "cuda" | "cpu"
     # CIFAR-10: torchvision uses <data_root>/cifar-10-batches-py/ OR <data_root>/cifar10/cifar-10-batches-py/
     # (auto-detected). Fashion-MNIST uses <data_root>/fashion_mnist/FashionMNIST/.
+    # COVID-19 Radiography uses <data_root>/covid19/COVID-19_Radiography_Dataset/.
     # AG News uses <data_root>/ag_news/hf_cache (HuggingFace datasets).
     data_root: str = field(default_factory=_default_data_root)
     # Keep existing offline behavior by default. Fresh machines can set this

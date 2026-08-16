@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "name": "stage_a_covid19_screen",
+  "tasks": [
+    "covid19"
+  ],
+  "client_lrs": [
+    0.005,
+    0.01,
+    0.03,
+    0.05,
+    0.1
+  ],
+  "client_weight_decays": [
+    0.0,
+    0.0001,
+    0.0005,
+    0.001
+  ],
+  "seeds": [
+    42
+  ],
+  "gpus": [
+    0,
+    1,
+    2
+  ],
+  "workers_per_gpu": 4,
+  "cpu_threads_per_worker": 2,
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "generated_config_dir": "configs/stage_a/generated_covid19_screen",
+  "output_root": "log/stage_a/covid19_screen",
+  "selection_file": "log/stage_a/covid19_screen_selection.json",
+  "score_last_n_rounds": 10,
+  "common_overrides": {
+    "num_clients": 100,
+    "num_malicious": 0,
+    "total_rounds": 60,
+    "client_momentum": 0.9,
+    "local_epochs": 1,
+    "num_workers": 0,
+    "use_amp": false,
+    "channels_last": false,
+    "cuda_aggregation": true,
+    "reuse_client_model": true,
+    "round_diagnostics": false,
+    "dirichlet_alpha": null,
+    "hf_datasets_offline": true
+  },
+  "prepare_data_overrides": {},
+  "task_overrides": {
+    "covid19": {
+      "batch_size": 64,
+      "client_batch_group_size": 10
+    }
+  },
+  "promotion_defaults": {
+    "top_k": 3,
+    "total_rounds": 300,
+    "seeds": [
+      42,
+      43,
+      44
+    ],
+    "generated_config_dir": "configs/stage_a/generated_covid19_confirm",
+    "output_root": "log/stage_a/covid19_confirm",
+    "selection_file": "log/stage_a/covid19_confirm_selection.json"
+  }
+}
