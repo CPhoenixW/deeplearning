@@ -95,6 +95,10 @@
       "client_lr": 0.05,
       "client_weight_decay": 0.0001
     },
+    "covid19": {
+      "client_lr": 0.005,
+      "client_weight_decay": 0.0
+    },
     "ag_news": {
       "client_lr": 0.1,
       "client_weight_decay": 0.0
