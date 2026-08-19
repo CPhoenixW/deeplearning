@@ -398,11 +398,13 @@ def _trial_score(trial: Trial, last_n: int) -> float:
     values: List[float] = []
     for item in rounds[-last_n:]:
         evaluation = item.get("evaluation", {}) if isinstance(item, dict) else {}
-        accuracy = evaluation.get("accuracy") if isinstance(evaluation, dict) else None
-        if isinstance(accuracy, (int, float)):
-            values.append(float(accuracy))
+        metric = evaluation.get("balanced_accuracy") if isinstance(evaluation, dict) else None
+        if metric is None and isinstance(evaluation, dict):
+            metric = evaluation.get("accuracy")
+        if isinstance(metric, (int, float)):
+            values.append(float(metric))
     if not values:
-        raise ValueError(f"No clean TACC values in {trial.result_path}")
+        raise ValueError(f"No clean balanced-accuracy values in {trial.result_path}")
     return statistics.mean(values)
 
 
@@ -482,7 +484,10 @@ def select_candidates(
 
     return {
         "protocol": "clean FedAvg Stage-A task-model calibration",
-        "score": f"mean clean TACC over each seed's last {last_n} rounds",
+        "score": (
+            f"mean clean balanced accuracy over each seed's last {last_n} rounds; "
+            "legacy results fall back to accuracy"
+        ),
         "selection_uses_only": "clean_tacc",
         "expected_seeds": sorted(expected_seeds),
         "missing_or_invalid": missing,

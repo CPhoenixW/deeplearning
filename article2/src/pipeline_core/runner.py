@@ -56,10 +56,12 @@ def evaluate(
     *,
     use_amp: bool = False,
     channels_last: bool = False,
-) -> Tuple[float, int, int]:
+) -> Dict[str, Any]:
     model.eval()
     correct = 0
     total = 0
+    class_correct: Tensor | None = None
+    class_total: Tensor | None = None
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
@@ -75,8 +77,32 @@ def evaluate(
             preds = torch.argmax(logits, dim=1)
             correct += (preds == y).sum().item()
             total += y.size(0)
+            num_classes = int(logits.shape[1])
+            if class_correct is None:
+                class_correct = torch.zeros(num_classes, dtype=torch.float64)
+                class_total = torch.zeros(num_classes, dtype=torch.float64)
+            class_correct += torch.bincount(
+                y[preds == y], minlength=num_classes
+            ).double().cpu()
+            class_total += torch.bincount(y, minlength=num_classes).double().cpu()
     acc = correct / max(1, total)
-    return acc, correct, total
+    if class_correct is None or class_total is None:
+        recalls = torch.zeros(0, dtype=torch.float64)
+    else:
+        recalls = torch.where(
+            class_total > 0,
+            class_correct / class_total.clamp_min(1.0),
+            torch.zeros_like(class_total),
+        )
+    present = class_total > 0 if class_total is not None else torch.zeros(0, dtype=torch.bool)
+    balanced = float(recalls[present].mean().item()) if bool(present.any()) else 0.0
+    return {
+        "accuracy": float(acc),
+        "correct": int(correct),
+        "total": int(total),
+        "balanced_accuracy": balanced,
+        "per_class_recall": [float(value) for value in recalls.tolist()],
+    }
 
 
 def _flatten_float_state_delta(
@@ -300,6 +326,8 @@ def _build_round_event(context: PipelineContext) -> Dict[str, Any]:
         "test_acc": context.evaluation["accuracy"],
         "test_correct": context.evaluation["correct"],
         "test_total": context.evaluation["total"],
+        "balanced_accuracy": context.evaluation.get("balanced_accuracy"),
+        "per_class_recall": context.evaluation.get("per_class_recall"),
         "backdoor_asr": context.evaluation.get("backdoor_asr"),
         "tpr": tpr,
         "fpr": fpr,

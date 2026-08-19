@@ -54,6 +54,10 @@ class FedConfig:
     client_lr: float = 0.1
     client_momentum: float = 0.9
     client_weight_decay: float = 5e-4
+    # ``inverse_frequency`` is used for imbalanced image tasks such as COVID-19.
+    # The resolved weights are populated after the client split is built.
+    class_weight_mode: str = "none"
+    client_class_weights: list[float] | None = None
     # Fixed numerical-stability guards.  ``client_grad_clip`` bounds every
     # local SGD gradient norm; ``client_update_clip`` bounds the complete
     # post-attack model delta uploaded by a participant.  ``None`` keeps the

@@ -673,6 +673,22 @@ def _split_train_test_loaders(
         index for index in range(len(train_dataset)) if index not in validation_lookup
     ]
     available_labels = labels[available_indices]
+    class_weight_mode = str(getattr(config, "class_weight_mode", "none")).lower().strip()
+    if class_weight_mode == "none":
+        config.client_class_weights = None
+    elif class_weight_mode == "inverse_frequency":
+        counts = torch.bincount(available_labels, minlength=int(num_classes)).float()
+        if bool((counts <= 0).any().item()):
+            raise ValueError("Every class needs at least one client-training sample.")
+        weights = available_labels.numel() / (float(num_classes) * counts)
+        # Keep the mean loss scale comparable with the unweighted criterion.
+        weights = weights / weights.mean()
+        config.client_class_weights = [float(value) for value in weights.tolist()]
+    else:
+        raise ValueError(
+            f"Unknown class_weight_mode {config.class_weight_mode!r}; "
+            "use 'none' or 'inverse_frequency'."
+        )
     num_clients = config.num_clients
     alpha = config.dirichlet_alpha
     if alpha is None and config.dirichlet_noniid_beta is not None:

@@ -33,6 +33,7 @@
   "output_root": "log/stage_a/covid19_screen",
   "selection_file": "log/stage_a/covid19_screen_selection.json",
   "score_last_n_rounds": 10,
+  "score_metric": "balanced_accuracy",
   "common_overrides": {
     "num_clients": 100,
     "num_malicious": 0,

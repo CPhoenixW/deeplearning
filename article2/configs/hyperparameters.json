@@ -97,7 +97,8 @@
     },
     "covid19": {
       "client_lr": 0.005,
-      "client_weight_decay": 0.0
+      "client_weight_decay": 0.0,
+      "class_weight_mode": "inverse_frequency"
     },
     "ag_news": {
       "client_lr": 0.1,

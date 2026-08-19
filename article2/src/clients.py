@@ -64,7 +64,13 @@ class BenignClient(BaseClient):
     ) -> None:
         super().__init__(client_id, device, config, loader)
         self.model_fn = model_fn
-        self._criterion = nn.CrossEntropyLoss()
+        class_weights = getattr(config, "client_class_weights", None)
+        weight_tensor = None
+        if class_weights is not None:
+            weight_tensor = torch.as_tensor(
+                class_weights, dtype=torch.float32, device=device
+            )
+        self._criterion = nn.CrossEntropyLoss(weight=weight_tensor)
         self._amp_enabled = bool(config.use_amp and device.type == "cuda")
         self._scaler = torch.amp.GradScaler("cuda", enabled=self._amp_enabled)
         self._grad_clip = resolve_clip_norm(

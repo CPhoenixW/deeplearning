@@ -37,6 +37,12 @@ class BatchedClientExecutor:
         with torch.random.fork_rng(devices=[]):
             functional_model = model_fn()
         self.functional_model = functional_model.to("meta").train()
+        class_weights = getattr(config, "client_class_weights", None)
+        self.class_weights = (
+            torch.as_tensor(class_weights, dtype=torch.float32, device=device)
+            if class_weights is not None
+            else None
+        )
         self.parameter_names = tuple(name for name, _ in functional_model.named_parameters())
         self.buffer_names = tuple(name for name, _ in functional_model.named_buffers())
         self._parameter_set = set(self.parameter_names)
@@ -49,7 +55,7 @@ class BatchedClientExecutor:
             y: Tensor,
         ) -> Tensor:
             logits = functional_call(self.functional_model, (params, buffers), (x,))
-            return F.cross_entropy(logits, y)
+            return F.cross_entropy(logits, y, weight=self.class_weights)
 
         self._batched_grad = vmap(
             grad(loss_fn),

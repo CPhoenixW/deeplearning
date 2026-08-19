@@ -163,18 +163,22 @@ class EvaluationStage:
     name: str = "evaluation"
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        accuracy, correct, total = self.evaluate(
+        evaluated = self.evaluate(
             context.defense.global_model,
             context.test_loader,
             context.device,
             use_amp=context.config.use_amp,
             channels_last=context.config.channels_last,
         )
-        context.evaluation = {
-            "accuracy": float(accuracy),
-            "correct": int(correct),
-            "total": int(total),
-        }
+        if isinstance(evaluated, dict):
+            context.evaluation = dict(evaluated)
+        else:
+            accuracy, correct, total = evaluated
+            context.evaluation = {
+                "accuracy": float(accuracy),
+                "correct": int(correct),
+                "total": int(total),
+            }
         if self.evaluate_extra is not None:
             context.evaluation.update(self.evaluate_extra(context))
         context.event = self.build_event(context)

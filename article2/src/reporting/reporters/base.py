@@ -129,6 +129,12 @@ class RoundReporter:
             "rr": float(event["rr"]),
             "reject_rate": float(event["reject_rate"]),
         }
+        if event.get("balanced_accuracy") is not None:
+            evaluation["balanced_accuracy"] = float(event["balanced_accuracy"])
+        if event.get("per_class_recall") is not None:
+            evaluation["per_class_recall"] = [
+                float(value) for value in event["per_class_recall"]
+            ]
         if event.get("backdoor_asr") is not None:
             evaluation["backdoor_asr"] = float(event["backdoor_asr"])
         return {
@@ -163,6 +169,7 @@ class RoundReporter:
         evaluation_line = (
             "Evaluation  "
             f"accuracy={evaluation['accuracy']:.4f}  "
+            f"balanced_accuracy={evaluation.get('balanced_accuracy', float('nan')):.4f}  "
             f"TPR={evaluation['tpr']:.4f}  FPR={evaluation['fpr']:.4f}"
         )
         if "backdoor_asr" in evaluation:
