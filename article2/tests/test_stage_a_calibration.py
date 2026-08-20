@@ -70,7 +70,7 @@ def test_covid19_stage_a_manifest_generates_isolated_grid() -> None:
     assert payload["attacks"] == "none"
     assert payload["defenses"] == "avg"
     assert payload["fed_config_overrides"]["num_malicious"] == 0
-    assert payload["fed_config_overrides"]["client_batch_group_size"] == 1
+    assert payload["fed_config_overrides"]["client_batch_group_size"] == 10
 
 
 def _write_result(trial: Trial, accuracies: list[float]) -> None:

@@ -44,6 +44,12 @@ class BatchedClientExecutor:
             else None
         )
         self.parameter_names = tuple(name for name, _ in functional_model.named_parameters())
+        self.trainable_parameter_names = tuple(
+            name
+            for name, parameter in functional_model.named_parameters()
+            if parameter.requires_grad
+        )
+        self._trainable_parameter_set = set(self.trainable_parameter_names)
         self.buffer_names = tuple(name for name, _ in functional_model.named_buffers())
         self._parameter_set = set(self.parameter_names)
         self._buffer_set = set(self.buffer_names)
@@ -116,12 +122,16 @@ class BatchedClientExecutor:
         count: int,
         *,
         requires_grad: bool,
+        trainable_names: set[str] | None = None,
     ) -> Dict[str, Tensor]:
         out: Dict[str, Tensor] = {}
         for name in names:
             value = global_state_dict[name].detach()
             stacked = value.unsqueeze(0).expand(count, *value.shape).clone()
-            if requires_grad:
+            parameter_requires_grad = requires_grad and (
+                trainable_names is None or name in trainable_names
+            )
+            if parameter_requires_grad:
                 stacked.requires_grad_()
             out[name] = stacked
         return out
@@ -141,6 +151,7 @@ class BatchedClientExecutor:
             self.parameter_names,
             count,
             requires_grad=True,
+            trainable_names=self._trainable_parameter_set,
         )
         buffers = self._stack_state(
             global_state_dict,
@@ -148,7 +159,10 @@ class BatchedClientExecutor:
             count,
             requires_grad=False,
         )
-        momentum = {name: torch.zeros_like(value) for name, value in params.items()}
+        momentum = {
+            name: torch.zeros_like(params[name])
+            for name in self.trainable_parameter_names
+        }
 
         lr = float(self.config.client_lr)
         momentum_factor = float(self.config.client_momentum)
@@ -173,6 +187,8 @@ class BatchedClientExecutor:
                 grads = self._clip_batched_gradients(grads, count)
                 with torch.no_grad():
                     for name, value in params.items():
+                        if name not in self._trainable_parameter_set:
+                            continue
                         update = grads[name]
                         if weight_decay != 0.0:
                             update = update.add(value, alpha=weight_decay)
