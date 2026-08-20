@@ -13,10 +13,10 @@ The primary study covers four image tasks and one text task. A fixed clean serve
 | MNIST                         | 28 x 28 grayscale, 10 classes | `LeNetClassifier`                  | Basic image-classification sanity check                   |
 | Fashion-MNIST                 | 28 x 28 grayscale, 10 classes | `FashionCNN`                       | Fine-grained grayscale classification and stability check |
 | CIFAR-10                      | 32 x 32 RGB, 10 classes       | CIFAR-adapted ResNet-18            | Deeper visual model and primary robustness task           |
-| COVID-19 Radiography Database | Chest X-ray images, 4 classes | Lightweight CNN                    | Medical-image classification and cross-domain robustness  |
+| COVID-19 Radiography Database | Chest X-ray images, 4 classes | ImageNet-pretrained ResNet-50     | Medical-image classification and cross-domain robustness  |
 | AG News                       | Tokenized text, 4 classes     | Lightweight Transformer classifier | Cross-modal transfer to text                              |
 
-The COVID-19 task follows the commonly used four-class COVID-19 Radiography Database protocol. Its loader, preprocessing, client partition, and model calibration must be recorded before any result is included in the primary matrix. Accuracy is compared only within the same dataset. Cross-dataset conclusions use relative accuracy drop, detection quality, and overhead rather than raw accuracy. Image-trigger ASR is `N/A` for AG News.
+The COVID-19 task follows the commonly used four-class COVID-19 Radiography Database protocol. Images are resized to 224 x 224, replicated to three channels, and normalized with ImageNet statistics. The ImageNet-pretrained ResNet-50 feature extractor is frozen while the four-class head is trained locally. Its loader, preprocessing, client partition, and model calibration must be recorded before any result is included in the primary matrix. Accuracy is compared only within the same dataset. Cross-dataset conclusions use relative accuracy drop, detection quality, and overhead rather than raw accuracy. Image-trigger ASR is `N/A` for AG News.
 
 ### 4.1.2 Federated Learning Protocol
 

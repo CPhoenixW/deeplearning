@@ -5,7 +5,7 @@ from typing import Tuple
 
 import torch
 from torch import Tensor, nn
-from torchvision.models import resnet18
+from torchvision.models import ResNet50_Weights, resnet18, resnet50
 
 
 def resnet18_cifar10(num_classes: int = 10) -> nn.Module:
@@ -120,6 +120,46 @@ def covid19_cnn(num_classes: int = 4) -> nn.Module:
     """Build the COVID-19 Radiography 128x128 backbone."""
 
     return Covid19CNN(num_classes=num_classes)
+
+
+class Covid19ResNet50(nn.Module):
+    """ImageNet-pretrained ResNet-50 with a four-class X-ray head.
+
+    The radiography task has only a few hundred examples per client.  Keeping
+    the ResNet feature extractor frozen follows the established COVID CXR
+    transfer-learning/FL protocol and makes local optimization practical.
+    BatchNorm statistics in the frozen backbone are also kept in evaluation
+    mode so heterogeneous client batches cannot corrupt the shared features.
+    """
+
+    def __init__(self, num_classes: int = 4) -> None:
+        super().__init__()
+        backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
+        in_features = int(backbone.fc.in_features)
+        backbone.fc = nn.Identity()
+        for parameter in backbone.parameters():
+            parameter.requires_grad_(False)
+        self.backbone = backbone
+        self.classifier = nn.Sequential(
+            nn.Dropout(p=0.2),
+            nn.Linear(in_features, num_classes),
+        )
+
+    def train(self, mode: bool = True) -> "Covid19ResNet50":
+        super().train(mode)
+        # Keep frozen BatchNorm running statistics fixed during local training.
+        self.backbone.eval()
+        self.classifier.train(mode)
+        return self
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.classifier(self.backbone(x))
+
+
+def covid19_resnet50(num_classes: int = 4) -> nn.Module:
+    """Build the pretrained ResNet-50 used for COVID-19 radiographs."""
+
+    return Covid19ResNet50(num_classes=num_classes)
 
 
 def build_resnet18(num_classes: int = 10) -> nn.Module:

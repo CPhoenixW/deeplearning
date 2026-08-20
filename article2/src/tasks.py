@@ -23,7 +23,7 @@ try:
     from .config import FedConfig
     from .models import (
         ag_news_classifier,
-        covid19_cnn,
+        covid19_resnet50,
         fashion_mnist_cnn,
         lenet_grayscale,
         resnet18_cifar10,
@@ -32,7 +32,7 @@ except ImportError:
     from config import FedConfig
     from models import (
         ag_news_classifier,
-        covid19_cnn,
+        covid19_resnet50,
         fashion_mnist_cnn,
         lenet_grayscale,
         resnet18_cifar10,
@@ -333,22 +333,32 @@ class Covid19Task(FederatedTask):
         return _resolve_covid19_root(config)
 
     def build_model(self) -> torch.nn.Module:
-        return covid19_cnn(num_classes=self.num_classes)
+        return covid19_resnet50(num_classes=self.num_classes)
 
     def build_dataloaders(
         self, config: FedConfig
     ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
         transform_train = transforms.Compose(
             [
-                transforms.Resize((128, 128)),
+                transforms.Resize((224, 224)),
+                transforms.Grayscale(num_output_channels=3),
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=(0.485, 0.456, 0.406),
+                    std=(0.229, 0.224, 0.225),
+                ),
             ]
         )
         transform_test = transforms.Compose(
             [
-                transforms.Resize((128, 128)),
+                transforms.Resize((224, 224)),
+                transforms.Grayscale(num_output_channels=3),
                 transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=(0.485, 0.456, 0.406),
+                    std=(0.229, 0.224, 0.225),
+                ),
             ]
         )
         records = scan_covid19_records(self.data_subdir(config))

@@ -62,7 +62,7 @@ def test_stage_a_screen_manifest_generates_expected_grid() -> None:
 def test_covid19_stage_a_manifest_generates_isolated_grid() -> None:
     _path, manifest = load_manifest("configs/stage_a_covid19_screen.json")
     trials = build_trials(manifest)
-    assert len(trials) == 20
+    assert len(trials) == 16
     assert {trial.task for trial in trials} == {"covid19"}
     trial = trials[0]
     payload = _pipeline_payload(manifest, trial)
@@ -70,7 +70,7 @@ def test_covid19_stage_a_manifest_generates_isolated_grid() -> None:
     assert payload["attacks"] == "none"
     assert payload["defenses"] == "avg"
     assert payload["fed_config_overrides"]["num_malicious"] == 0
-    assert payload["fed_config_overrides"]["client_batch_group_size"] == 10
+    assert payload["fed_config_overrides"]["client_batch_group_size"] == 1
 
 
 def _write_result(trial: Trial, accuracies: list[float]) -> None:

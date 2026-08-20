@@ -5,7 +5,6 @@
     "covid19"
   ],
   "client_lrs": [
-    0.0001,
     0.0005,
     0.001,
     0.002,
@@ -13,9 +12,9 @@
   ],
   "client_weight_decays": [
     0.0,
+    0.00001,
     0.0001,
-    0.0005,
-    0.001
+    0.0005
   ],
   "seeds": [
     42
@@ -39,7 +38,7 @@
     "num_malicious": 0,
     "total_rounds": 60,
     "client_momentum": 0.9,
-    "local_epochs": 1,
+    "local_epochs": 10,
     "num_workers": 0,
     "use_amp": false,
     "channels_last": false,
@@ -52,11 +51,11 @@
   "prepare_data_overrides": {},
   "task_overrides": {
     "covid19": {
-      "batch_size": 64,
-      "client_batch_group_size": 10,
+      "batch_size": 8,
+      "client_batch_group_size": 1,
       "class_weight_mode": "none",
       "client_sampling_mode": "balanced",
-      "local_epochs": 2
+      "local_epochs": 10
     }
   },
   "promotion_defaults": {

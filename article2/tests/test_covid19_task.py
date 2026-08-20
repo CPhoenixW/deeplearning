@@ -7,7 +7,7 @@ import torch
 from PIL import Image
 
 from src.config import FedConfig
-from src.models import Covid19CNN
+from src.models import Covid19ResNet50
 from src.tasks import (
     COVID19_CLASS_TO_INDEX,
     TASK_REGISTRY,
@@ -39,17 +39,15 @@ def _write_fixture(root: Path, samples_per_class: int = 20) -> Path:
     return dataset_root
 
 
-def test_covid19_model_is_lightweight_four_layer_grayscale_cnn() -> None:
+def test_covid19_model_uses_pretrained_resnet50_with_frozen_backbone() -> None:
     task = TASK_REGISTRY["covid19"]()
     model = task.build_model()
-    assert isinstance(model, Covid19CNN)
-    assert model(torch.randn(2, 1, 128, 128)).shape == (2, 4)
-    assert sum(isinstance(module, torch.nn.Conv2d) for module in model.modules()) == 4
-    assert sum(parameter.numel() for parameter in model.parameters()) < 150_000
-    assert not any(
-        isinstance(module, torch.nn.modules.batchnorm._BatchNorm)
-        for module in model.modules()
-    )
+    assert isinstance(model, Covid19ResNet50)
+    assert model(torch.randn(2, 3, 224, 224)).shape == (2, 4)
+    assert sum(parameter.numel() for parameter in model.parameters()) > 20_000_000
+    assert sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    ) == 8196
 
 
 def test_covid19_fixed_mapping_and_scanner_ignore_masks(tmp_path: Path) -> None:
@@ -123,7 +121,7 @@ def test_covid19_loaders_use_80_20_split_and_withhold_50(tmp_path: Path) -> None
 
     images, labels = next(iter(test_loader))
     assert images.ndim == 4
-    assert images.shape[1:] == (1, 128, 128)
+    assert images.shape[1:] == (3, 224, 224)
     assert set(labels.tolist()).issubset({0, 1, 2, 3})
 
 
