@@ -50,6 +50,9 @@ class BatchedClientExecutor:
             if parameter.requires_grad
         )
         self._trainable_parameter_set = set(self.trainable_parameter_names)
+        self._all_parameters_trainable = (
+            self._trainable_parameter_set == set(self.parameter_names)
+        )
         self.buffer_names = tuple(name for name, _ in functional_model.named_buffers())
         self._parameter_set = set(self.parameter_names)
         self._buffer_set = set(self.buffer_names)
@@ -109,6 +112,8 @@ class BatchedClientExecutor:
         loader_lengths = {len(client.loader) for client in clients}
         dataset_lengths = {len(client.loader.dataset) for client in clients}
         return (
+            self._all_parameters_trainable
+            and
             int(self.config.local_epochs) > 0
             and loader_lengths != {0}
             and len(loader_lengths) == 1

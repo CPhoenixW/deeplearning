@@ -52,7 +52,7 @@
   "task_overrides": {
     "covid19": {
       "batch_size": 64,
-      "client_batch_group_size": 10,
+      "client_batch_group_size": 1,
       "class_weight_mode": "none",
       "client_sampling_mode": "balanced",
       "local_epochs": 10
