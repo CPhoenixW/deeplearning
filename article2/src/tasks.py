@@ -720,7 +720,16 @@ def _split_train_test_loaders(
         sampler = None
         if sampling_mode == "balanced":
             subset_labels = labels[indices]
-            sample_weights = inverse_weights[subset_labels].double()
+            subset_counts = torch.bincount(
+                subset_labels, minlength=int(num_classes)
+            ).float()
+            present = subset_counts > 0
+            subset_weights = torch.zeros_like(subset_counts)
+            subset_weights[present] = 1.0 / subset_counts[present]
+            subset_weights[present] = (
+                subset_weights[present] / subset_weights[present].mean()
+            )
+            sample_weights = subset_weights[subset_labels].double()
             sampler = WeightedRandomSampler(
                 sample_weights,
                 num_samples=len(indices),
