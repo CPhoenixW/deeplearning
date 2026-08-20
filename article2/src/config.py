@@ -58,6 +58,9 @@ class FedConfig:
     # The resolved weights are populated after the client split is built.
     class_weight_mode: str = "none"
     client_class_weights: list[float] | None = None
+    # ``balanced`` samples local client batches with replacement so each class
+    # contributes comparable gradient mass without changing the held-out test set.
+    client_sampling_mode: str = "none"
     # Fixed numerical-stability guards.  ``client_grad_clip`` bounds every
     # local SGD gradient norm; ``client_update_clip`` bounds the complete
     # post-attack model delta uploaded by a participant.  ``None`` keeps the

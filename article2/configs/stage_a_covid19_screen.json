@@ -5,11 +5,11 @@
     "covid19"
   ],
   "client_lrs": [
-    0.005,
-    0.01,
-    0.03,
-    0.05,
-    0.1
+    0.0001,
+    0.0005,
+    0.001,
+    0.002,
+    0.005
   ],
   "client_weight_decays": [
     0.0,
@@ -54,7 +54,9 @@
     "covid19": {
       "batch_size": 64,
       "client_batch_group_size": 10,
-      "class_weight_mode": "inverse_frequency"
+      "class_weight_mode": "none",
+      "client_sampling_mode": "balanced",
+      "local_epochs": 2
     }
   },
   "promotion_defaults": {

@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple, Type
 
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, Subset, WeightedRandomSampler
 from torchvision import datasets, transforms
 _HF_DATASETS_IMPORT_ERROR = None
 try:
@@ -674,16 +674,15 @@ def _split_train_test_loaders(
     ]
     available_labels = labels[available_indices]
     class_weight_mode = str(getattr(config, "class_weight_mode", "none")).lower().strip()
+    counts = torch.bincount(available_labels, minlength=int(num_classes)).float()
+    if bool((counts <= 0).any().item()):
+        raise ValueError("Every class needs at least one client-training sample.")
+    inverse_weights = available_labels.numel() / (float(num_classes) * counts)
+    inverse_weights = inverse_weights / inverse_weights.mean()
     if class_weight_mode == "none":
         config.client_class_weights = None
     elif class_weight_mode == "inverse_frequency":
-        counts = torch.bincount(available_labels, minlength=int(num_classes)).float()
-        if bool((counts <= 0).any().item()):
-            raise ValueError("Every class needs at least one client-training sample.")
-        weights = available_labels.numel() / (float(num_classes) * counts)
-        # Keep the mean loss scale comparable with the unweighted criterion.
-        weights = weights / weights.mean()
-        config.client_class_weights = [float(value) for value in weights.tolist()]
+        config.client_class_weights = [float(value) for value in inverse_weights.tolist()]
     else:
         raise ValueError(
             f"Unknown class_weight_mode {config.class_weight_mode!r}; "
@@ -708,12 +707,30 @@ def _split_train_test_loaders(
     ]
 
     client_loaders: List[DataLoader] = []
+    sampling_mode = str(
+        getattr(config, "client_sampling_mode", "none")
+    ).lower().strip()
+    if sampling_mode not in {"none", "balanced"}:
+        raise ValueError(
+            f"Unknown client_sampling_mode {config.client_sampling_mode!r}; "
+            "use 'none' or 'balanced'."
+        )
     for indices in client_index_lists:
         subset = Subset(train_dataset, indices)
+        sampler = None
+        if sampling_mode == "balanced":
+            subset_labels = labels[indices]
+            sample_weights = inverse_weights[subset_labels].double()
+            sampler = WeightedRandomSampler(
+                sample_weights,
+                num_samples=len(indices),
+                replacement=True,
+            )
         loader = DataLoader(
             subset,
             batch_size=config.batch_size,
-            shuffle=True,
+            shuffle=sampler is None,
+            sampler=sampler,
             num_workers=int(getattr(config, "num_workers", 0)),
             pin_memory=(config.device in ("cuda", "auto")),
         )
