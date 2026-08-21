@@ -33,6 +33,8 @@ DistanceObjective = Literal["minmax", "minsum"]
 DEVIATION_MODES = ("std", "sign", "unit_vec")
 _INITIAL_LAMBDA = 10.0
 _SEARCH_TOLERANCE = 1e-5
+_MAX_ATTACK_LAMBDA = 1.0e4
+_FLOAT32_MAX = float(torch.finfo(torch.float32).max)
 
 
 class MinMaxAttack(CoordinatedModelPoisoningAttack):
@@ -102,16 +104,16 @@ def _mean_norm(
     *,
     device: torch.device,
 ) -> Tensor:
-    norm_sq = torch.zeros((), dtype=torch.float32, device=device)
+    norm_sq = torch.zeros((), dtype=torch.float64, device=device)
     for _name, _start, _end, deltas in iter_benign_delta_chunks(
         global_state,
         states,
         parameter_names,
         device=device,
     ):
-        mean = deltas.mean(dim=0)
+        mean = deltas.to(dtype=torch.float64).mean(dim=0)
         norm_sq = norm_sq + mean.square().sum()
-    return norm_sq.sqrt()
+    return norm_sq.clamp_min(0.0).sqrt()
 
 
 def _deviation(
@@ -149,10 +151,14 @@ def _distance_statistics(
         raise ValueError("Min-Max and Min-Sum require at least two benign updates.")
     if mode == "unit_vec" and mean_norm is None:
         mean_norm = _mean_norm(global_state, states, parameter_names, device=device)
-    pairwise_squared = torch.zeros((count, count), dtype=torch.float32, device=device)
-    candidate_a = torch.zeros(count, dtype=torch.float32, device=device)
-    candidate_b = torch.zeros(count, dtype=torch.float32, device=device)
-    candidate_c = torch.zeros((), dtype=torch.float32, device=device)
+    # Distance statistics are accumulated in float64.  The benign updates are
+    # still read in float32 chunks, but squaring and repeated dot-product
+    # accumulation in float32 can overflow before the final crafted update is
+    # written back to a model state.
+    pairwise_squared = torch.zeros((count, count), dtype=torch.float64, device=device)
+    candidate_a = torch.zeros(count, dtype=torch.float64, device=device)
+    candidate_b = torch.zeros(count, dtype=torch.float64, device=device)
+    candidate_c = torch.zeros((), dtype=torch.float64, device=device)
 
     for _name, _start, _end, deltas in iter_benign_delta_chunks(
         global_state,
@@ -160,6 +166,7 @@ def _distance_statistics(
         parameter_names,
         device=device,
     ):
+        deltas = deltas.to(dtype=torch.float64)
         mean = deltas.mean(dim=0)
         centered = deltas - mean
         deviation = _deviation(
@@ -197,17 +204,34 @@ def _largest_feasible_lambda(
 ) -> float:
     """Reproduce the source Min-Max/Min-Sum lambda binary search."""
 
+    if not all(
+        bool(torch.isfinite(value).all().item())
+        for value in (
+            statistics.pairwise_squared,
+            statistics.candidate_a,
+            statistics.candidate_b,
+            statistics.candidate_c,
+        )
+    ):
+        return 0.0
+
     if objective == "minmax":
         threshold = float(statistics.pairwise_squared.max().item())
 
         def feasible(value: float) -> bool:
-            return float(statistics.candidate_squared_distances(value).max().item()) <= threshold
+            distances = statistics.candidate_squared_distances(value)
+            return bool(torch.isfinite(distances).all().item()) and float(
+                distances.max().item()
+            ) <= threshold
 
     elif objective == "minsum":
         threshold = float(statistics.pairwise_squared.sum(dim=1).min().item())
 
         def feasible(value: float) -> bool:
-            return float(statistics.candidate_squared_distances(value).sum().item()) <= threshold
+            distances = statistics.candidate_squared_distances(value)
+            return bool(torch.isfinite(distances).all().item()) and float(
+                distances.sum().item()
+            ) <= threshold
 
     else:
         raise ValueError(f"Unknown distance-attack objective {objective!r}.")
@@ -220,6 +244,7 @@ def _largest_feasible_lambda(
     for _ in range(64):
         if abs(lambda_success - lambda_value) <= _SEARCH_TOLERANCE:
             break
+        lambda_value = min(max(float(lambda_value), 0.0), _MAX_ATTACK_LAMBDA)
         if feasible(lambda_value):
             lambda_success = lambda_value
             lambda_value = lambda_value + lambda_fail / 2.0
@@ -227,8 +252,25 @@ def _largest_feasible_lambda(
             lambda_value = lambda_value - lambda_fail / 2.0
         lambda_fail = lambda_fail / 2.0
     if not math.isfinite(lambda_success):
-        raise FloatingPointError("Distance-attack lambda search became non-finite.")
-    return float(lambda_success)
+        return 0.0
+    return float(min(max(lambda_success, 0.0), _MAX_ATTACK_LAMBDA))
+
+
+def _safe_crafted_chunk(mean: Tensor, deviation: Tensor, lambda_value: float) -> Tensor:
+    """Construct one finite float32-compatible attack chunk.
+
+    A non-finite candidate is treated as an unusable attack direction and
+    falls back to the benign mean.  The final clamp prevents a finite float64
+    candidate from becoming ``inf`` when it is stored in the float32 model
+    state used by the pipeline.
+    """
+
+    candidate = mean + float(lambda_value) * deviation
+    if not bool(torch.isfinite(candidate).all().item()):
+        candidate = mean
+    if not bool(torch.isfinite(candidate).all().item()):
+        candidate = torch.zeros_like(mean)
+    return candidate.clamp(min=-_FLOAT32_MAX, max=_FLOAT32_MAX)
 
 
 def _craft_distance_delta(
@@ -273,9 +315,9 @@ def _craft_distance_delta(
         )
         # Reference gradient form: mu_g - lambda * deviation_g.  Model deltas
         # satisfy delta = -eta * gradient, hence the sign-equivalent plus here.
-        crafted_delta[name].reshape(-1)[start:end] = (
-            mean + lambda_value * deviation
-        ).detach().cpu()
+        crafted_delta[name].reshape(-1)[start:end] = _safe_crafted_chunk(
+            mean, deviation, lambda_value
+        ).detach().cpu().float()
     return crafted_delta
 
 

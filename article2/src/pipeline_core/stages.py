@@ -112,7 +112,9 @@ class AttackStage:
         # Paper-defined omniscient attacks operate on trainable gradients, not
         # BatchNorm running statistics or other state-dict buffers.
         parameter_names = tuple(
-            name for name, _parameter in context.defense.global_model.named_parameters()
+            name
+            for name, parameter in context.defense.global_model.named_parameters()
+            if parameter.requires_grad
         )
         self.apply(
             context.config,

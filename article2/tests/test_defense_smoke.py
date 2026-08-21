@@ -12,6 +12,7 @@ from src.defenses import (
     AlignInsDefense,
     BNGuardDefense,
     DefenseContext,
+    FedAvgDefense,
     FLANDERSDefense,
     FLGMMDefense,
 )
@@ -28,6 +29,22 @@ def _make_client_states(model: torch.nn.Module, k: int = 5) -> list[dict[str, to
                 sd[name] = tensor + 0.01 * float(i + 1) * torch.randn_like(tensor)
         states.append(sd)
     return states
+
+
+def test_defense_parameter_view_excludes_frozen_parameters() -> None:
+    class FrozenToy(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.frozen = torch.nn.Parameter(torch.ones(3), requires_grad=False)
+            self.trainable = torch.nn.Parameter(torch.ones(2))
+
+    server = FedAvgDefense(
+        FedConfig(total_rounds=1),
+        d_bn=0,
+        device=torch.device("cpu"),
+        model_fn=FrozenToy,
+    )
+    assert server.param_names == ["trainable"]
 
 
 def test_registry_and_aliases() -> None:

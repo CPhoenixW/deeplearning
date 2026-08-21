@@ -85,7 +85,9 @@ class BaseDefense:
         self.validation_loader = validation_loader
         self.global_model = model_fn().to(self.device)
         self.param_names: List[str] = [
-            name for name, _parameter in self.global_model.named_parameters()
+            name
+            for name, parameter in self.global_model.named_parameters()
+            if parameter.requires_grad
         ]
         self._last_finite_global_state = {
             key: value.detach().cpu().clone()

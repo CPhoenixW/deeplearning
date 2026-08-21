@@ -265,6 +265,22 @@ def test_minmax_and_minsum_are_sign_equivalent_to_the_reference_gradient_code() 
         )
 
 
+def test_distance_attacks_keep_large_finite_updates_finite() -> None:
+    config = FedConfig(num_clients=4, num_benign=2, distance_attack_deviation="std")
+    global_state = _parameter_state(torch.zeros(4))
+    client_states = [
+        _parameter_state(torch.full((4,), 1e20)),
+        _parameter_state(torch.full((4,), -1e20)),
+        _parameter_state(torch.zeros(4)),
+        _parameter_state(torch.zeros(4)),
+    ]
+
+    for rewrite in (rewrite_minmax_uploads, rewrite_minsum_uploads):
+        states = copy.deepcopy(client_states)
+        rewrite(config, global_state, states, (2, 3), parameter_names=("weight",))
+        assert all(torch.isfinite(state["weight"]).all() for state in states)
+
+
 def test_mixed_round_hook_composes_lie_minmax_and_minsum() -> None:
     config = FedConfig(
         num_clients=8,

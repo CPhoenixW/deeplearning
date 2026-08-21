@@ -203,7 +203,11 @@ def rewrite_crafted_uploads(
             )
         output = reference.float() + delta.float()
         if not bool(torch.isfinite(output).all().item()):
-            raise FloatingPointError(f"Crafted update is non-finite for {name!r}.")
+            # A numerically invalid crafted update must not terminate an
+            # otherwise valid federated round.  Falling back to the global
+            # reference makes this malicious upload a deterministic no-op.
+            output = reference.float()
+        output = torch.nan_to_num(output, nan=0.0, posinf=0.0, neginf=0.0)
         template[name] = output.to(dtype=reference.dtype).clone()
 
     for client_id in client_ids:
