@@ -55,7 +55,7 @@
       "client_batch_group_size": 1,
       "class_weight_mode": "none",
       "client_sampling_mode": "balanced",
-      "local_epochs": 10
+      "local_epochs": 1
     }
   },
   "promotion_defaults": {

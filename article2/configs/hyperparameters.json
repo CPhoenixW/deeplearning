@@ -100,7 +100,7 @@
       "client_weight_decay": 0.0005,
       "class_weight_mode": "none",
       "client_sampling_mode": "balanced",
-      "local_epochs": 10
+      "local_epochs": 1
     },
     "ag_news": {
       "client_lr": 0.1,
