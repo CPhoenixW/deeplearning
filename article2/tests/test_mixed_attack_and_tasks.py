@@ -73,7 +73,7 @@ def test_modular_pipeline_registry_and_hyperparameters():
     table = load_hyperparameter_table("configs/hyperparameters.json")
     values = resolve_hyperparameters(table, "lf", "svdd", "cifar10")
     assert values["svdd_feature_mode"] == "fixed_projection"
-    assert values["alpha"] == 0.5
+    assert values["svdd_lambda"] == 0.5
     assert "ag_news_svdd_features" not in values
     assert values["param_descriptor_global_ratio"] == 0.5
     assert values["param_descriptor_layer_ratio"] == 0.375

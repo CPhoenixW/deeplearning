@@ -53,7 +53,7 @@ def _overrides(rounds: int) -> dict[str, Any]:
         "phase1_rounds": 3,
         "phase1_score_mode": "recon",
         "phase2_score_mode": "combined",
-        "alpha": 0.5,
+        "svdd_lambda": 0.5,
         "param_descriptor_dim": 4096,
         "param_descriptor_device": "cuda",
         "device": "cuda",

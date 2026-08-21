@@ -13,7 +13,7 @@
     "phase1_rounds": 3,
     "phase1_score_mode": "recon",
     "phase2_score_mode": "combined",
-    "alpha": 0.5,
+    "svdd_lambda": 0.5,
     "device": "cuda"
   }
 }

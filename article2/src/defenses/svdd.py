@@ -67,8 +67,8 @@ class SVDDDefense(BaseDefense):
         svdd_feature_extractor: Optional[Callable[[Dict[str, Tensor]], Tensor]] = None,
     ) -> None:
         super().__init__(config, d_bn, device, model_fn, validation_loader)
-        if not math.isfinite(float(config.alpha)) or not 0.0 <= float(config.alpha) <= 1.0:
-            raise ValueError("alpha must be finite and in [0, 1].")
+        if not math.isfinite(float(config.svdd_lambda)) or not 0.0 <= float(config.svdd_lambda) <= 1.0:
+            raise ValueError("svdd_lambda must be finite and in [0, 1].")
         legacy_mode = str(getattr(config, "svdd_score_mode", "legacy") or "legacy").lower().strip()
         phase1_mode = getattr(config, "phase1_score_mode", None)
         phase2_mode = getattr(config, "phase2_score_mode", None)
@@ -587,7 +587,10 @@ class SVDDDefense(BaseDefense):
         )
         recon_loss = recon_per_sample[keep].mean()
 
-        total_loss = self.config.alpha * svdd_loss + (1.0 - self.config.alpha) * recon_loss
+        total_loss = (
+            self.config.svdd_lambda * svdd_loss
+            + (1.0 - self.config.svdd_lambda) * recon_loss
+        )
 
         self._safe_ae_step(total_loss, self.config.svdd_grad_clip)
 
@@ -697,10 +700,13 @@ class SVDDDefense(BaseDefense):
         ) = self.phase2_step(client_state_dicts)
         kept = int(accepted.sum().item())
         total = len(client_state_dicts)
-        total_loss = self.config.alpha * svdd_loss + (1.0 - self.config.alpha) * recon_loss
+        total_loss = (
+            self.config.svdd_lambda * svdd_loss
+            + (1.0 - self.config.svdd_lambda) * recon_loss
+        )
         total_per_client = (
-            self.config.alpha * svdd_scores
-            + (1.0 - self.config.alpha) * recon_per_client
+            self.config.svdd_lambda * svdd_scores
+            + (1.0 - self.config.svdd_lambda) * recon_per_client
         )
         return RoundStats(
             center_norm=center_norm,

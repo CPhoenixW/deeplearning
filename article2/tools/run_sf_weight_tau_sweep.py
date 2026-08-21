@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch C002-based AE-SVDD alpha configurations with validation Top-K.
+"""Launch C002-based AE-SVDD lambda configurations with validation Top-K.
 
 Each active variant is assigned to one GPU.  A variant worker runs all requested
 seeds sequentially on its GPU, and each pipeline JSON contains the complete
@@ -19,12 +19,12 @@ from typing import Any, Mapping, Sequence
 
 
 VARIANTS: dict[str, dict[str, Any]] = {
-    "alpha02": {"alpha": 0.2},
-    "alpha025": {"alpha": 0.25},
-    "alpha033": {"alpha": 1.0 / 3.0},
-    "alpha05": {"alpha": 0.5},
-    "alpha075": {"alpha": 0.75},
-    "alpha1": {"alpha": 1.0},
+    "lambda02": {"svdd_lambda": 0.2},
+    "lambda025": {"svdd_lambda": 0.25},
+    "lambda033": {"svdd_lambda": 1.0 / 3.0},
+    "lambda05": {"svdd_lambda": 0.5},
+    "lambda075": {"svdd_lambda": 0.75},
+    "lambda1": {"svdd_lambda": 1.0},
 }
 
 DEFAULT_ATTACKS = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
@@ -67,7 +67,7 @@ C002_OVERRIDES: dict[str, Any] = {
     "phase1_rounds": 15,
     "center_ema_decay": 0.9,
     "svdd_grad_clip": 1.0,
-    "alpha": 0.5,
+    "svdd_lambda": 0.5,
     "center_init_quantile": 0.5,
     "phase2_recon_quantile": 0.8,
     "svdd_feature_clip": 10.0,

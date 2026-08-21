@@ -83,7 +83,7 @@ All methods receive the same client states, data partitions, round budget, and i
 | FedSECA          | `seca`               | Sign election and coordinate aggregation                    | `fedseca_sparsity_gamma=0.9`; `fedseca_temperature=1.0`      |
 | BNGuard          | `bnguard`            | Robust BN-feature distance filtering                        | `bnguard_tau=3.0`                                            |
 | FedDMC-style     | `dmc`                | Magnitude, direction, sign, sparsity, and temporal views    | `dmc_warmup_rounds=3`; `dmc_tau=3.0`; weights = `(1.0, 1.0, 1.0, 0.5, 1.0)` for norm/direction/sign/sparsity/temporal |
-| AE-SVDD (ours)   | `svdd`               | Fixed descriptor, AE reconstruction, and latent compactness | `latent_dim=64`; `phase1_rounds=15`; Phase 1=`recon`; Phase 2=`combined`; `alpha=0.5`; descriptor dim=`4096` |
+| AE-SVDD (ours)   | `svdd`               | Fixed descriptor, AE reconstruction, and latent compactness | `latent_dim=64`; `phase1_rounds=15`; Phase 1=`recon`; Phase 2=`combined`; `λ=0.5`; descriptor dim=`4096` |
 | FL-Defender      | `fld`                | PCA/reputation-based update detector                        | `fldefender_pca_components=2`; `fldefender_q1=0.25`          |
 | AlignIns         | `alignins`           | Direction and principal-sign alignment                      | `alignins_sparsity=0.9`; `alignins_lambda_s=1.0`; `alignins_lambda_c=1.0` |
 | FLGMM / FLANDERS | `flgmm` / `flanders` | Registered comparison implementations                       | FLGMM: `warmup_rounds=50`, `control_l=3.0`, `em_iters=50`; FLANDERS: `window=5`, `sampling=500`, `maxiter=100` |
@@ -129,11 +129,11 @@ Detection is evaluated independently from global utility. The compact portrait W
 
 ## 5.2 Parameter Sensitivity
 
-Sensitivity experiments vary one AE-SVDD factor at a time. Unless a subsection changes it, the fixed configuration is descriptor dimension 4096, latent dimension 64, Phase-1 length 15, Phase-1 score `recon`, Phase-2 score `combined`, and alpha = 0.5. The screening budget is 100 rounds; selected settings are re-run for 300 rounds with seeds 42--44 before supporting primary claims.
+Sensitivity experiments vary exactly one AE-SVDD factor at a time. Every run uses the single `GN` attack, the `svdd` defense, all five datasets, one seed (`42`), and 300 communication rounds. The fixed configuration is descriptor dimension 4096, `λ=0.5`, latent dimension 64, Phase-1 length 15, Phase-1 score `recon`, and Phase-2 score `combined`. The three one-factor sweeps therefore contain `(7 + 4 + 4) × 5 = 75` configurations; no Cartesian product and no additional baseline runs are included.
 
 ### 5.2.1 Loss Coefficient
 
-Sweep `alpha` in `{0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}`. Values 0 and 1 may be included as diagnostic pure-reconstruction and pure-SVDD controls, but are not required for the main sensitivity claim. Keep selection scores fixed (`recon` then `combined`) so only the Phase-2 training objective changes.
+Sweep the SVDD loss ratio `λ` (config key `svdd_lambda`) in `{0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}`. Values 0 and 1 are not part of the main sensitivity matrix. Keep selection scores fixed (`recon` then `combined`) so only the Phase-2 training objective changes. This `λ` is distinct from the Dirichlet data-partition parameter `alpha`.
 
 类似这张图
 
@@ -141,7 +141,7 @@ Sweep `alpha` in `{0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}`. Values 0 and 1 may be in
 
 ### 5.2.2 Phase-1 Duration
 
-Sweep `phase1_rounds` in `{5, 15, 30, 50}` with total rounds fixed at 100 for screening. Phase 1 always uses reconstruction-error ranking, and Phase 2 always uses the combined reconstruction-error plus SVDD-distance ranking. This isolates the duration of the reconstruction warm-up.
+Sweep `phase1_rounds` in `{5, 15, 30, 50}` with total rounds fixed at 300. Phase 1 always uses reconstruction-error ranking, and Phase 2 always uses the combined reconstruction-error plus SVDD-distance ranking. This isolates the duration of the reconstruction warm-up while keeping `λ=0.5`.
 
 类似这种图
 

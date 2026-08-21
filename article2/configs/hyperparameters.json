@@ -23,7 +23,7 @@
       "svdd_feature_clip": 10.0,
       "phase1_score_mode": "recon",
       "phase2_score_mode": "combined",
-      "alpha": 0.5,
+      "svdd_lambda": 0.5,
       "center_init_quantile": 0.5,
       "phase2_recon_quantile": 0.8
     },

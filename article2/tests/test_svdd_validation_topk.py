@@ -21,7 +21,7 @@ class _TinyModel(nn.Module):
         return self.fc(inputs)
 
 
-def test_both_phases_use_validation_topk_and_alpha() -> None:
+def test_both_phases_use_validation_topk_and_svdd_lambda() -> None:
     torch.manual_seed(7)
     validation = DataLoader(
         TensorDataset(torch.randn(64, 4), torch.randint(0, 2, (64,))),
@@ -36,7 +36,7 @@ def test_both_phases_use_validation_topk_and_alpha() -> None:
         param_descriptor_device="cpu",
         svdd_feature_mode="fixed_projection",
         device="cpu",
-        alpha=0.25,
+        svdd_lambda=0.25,
     )
     server = SVDDDefense(
         config,
@@ -148,11 +148,11 @@ def test_zero_rejection_can_win_validation_selection() -> None:
     assert selected_ratio == 0.0
 
 
-def test_phase_scores_are_independent_from_alpha() -> None:
+def test_phase_scores_are_independent_from_svdd_lambda() -> None:
     config = FedConfig(
         phase1_score_mode="recon",
         phase2_score_mode="combined",
-        alpha=0.5,
+        svdd_lambda=0.5,
         num_clients=5,
         num_benign=5,
         latent_dim=4,
@@ -169,4 +169,4 @@ def test_phase_scores_are_independent_from_alpha() -> None:
     )
     assert server.phase1_score_mode == "recon"
     assert server.phase2_score_mode == "combined"
-    assert config.alpha == 0.5
+    assert config.svdd_lambda == 0.5

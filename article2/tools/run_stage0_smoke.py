@@ -32,7 +32,7 @@ def _write_config(root: Path, task: str, attack: str, defense: str, rounds: int)
         "phase1_rounds": max(1, min(3, int(rounds) - 1)),
         "phase1_score_mode": "recon",
         "phase2_score_mode": "combined",
-        "alpha": 0.5,
+        "svdd_lambda": 0.5,
         "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
         "param_descriptor_dim": 4096,
         "param_descriptor_device": "cuda",

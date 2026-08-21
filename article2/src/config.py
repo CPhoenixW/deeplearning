@@ -181,10 +181,10 @@ class FedConfig:
     # --- SVDD ---
     center_ema_decay: float = 0.9
     svdd_grad_clip: float = 1.0
-    # Single tunable loss-mixing coefficient.  alpha=1 is pure SVDD;
-    # alpha=0 is pure reconstruction loss.  This coefficient is independent
-    # of the client-selection score used in either phase.
-    alpha: float = 0.5
+    # Single tunable SVDD loss-mixing coefficient.  svdd_lambda=1 is pure
+    # SVDD; svdd_lambda=0 is pure reconstruction loss.  This coefficient is
+    # independent of the Dirichlet alpha and of the client-selection score.
+    svdd_lambda: float = 0.5
     # New protocol fields.  ``None`` lets the compatibility field below
     # resolve historical configs; formal experiments set Phase 2 explicitly.
     phase1_score_mode: str | None = None
@@ -361,6 +361,13 @@ def apply_fed_config_overrides(
     pending_malicious = values.get("num_malicious")
     for key, value in values.items():
         if key == "num_malicious":
+            continue
+        # ``alpha`` was historically used for the SVDD loss coefficient.
+        # Keep old generated experiment configs readable while exposing the
+        # unambiguous ``svdd_lambda`` field in new configs and results.
+        if key == "alpha":
+            if "svdd_lambda" not in values:
+                setattr(config, "svdd_lambda", value)
             continue
         if key not in valid:
             raise ValueError(f"Unknown FedConfig field {key!r} in {source}.")

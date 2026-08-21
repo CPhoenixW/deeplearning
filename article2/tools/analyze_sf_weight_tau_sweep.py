@@ -99,7 +99,7 @@ def main() -> int:
         count = sum(row["candidate"] == candidate for row in rows)
         lines.append(
             f"| {candidate} | {count}/{len(DEFAULT_ATTACKS)} | "
-            f"alpha={parameters['alpha']:.2f}, phase1_rounds=15, "
+            f"lambda={parameters.get('svdd_lambda', parameters.get('alpha', float('nan'))):.2f}, phase1_rounds=15, "
             "Top-K reject ratio由50组验证集逐轮选择 |"
         )
 

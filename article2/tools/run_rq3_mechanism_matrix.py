@@ -62,7 +62,7 @@ BASE_OVERRIDES: dict[str, Any] = {
     "svdd_feature_clip": 10.0,
     "phase1_score_mode": "recon",
     "phase2_score_mode": "combined",
-    "alpha": 0.5,
+    "svdd_lambda": 0.5,
     "device": "cuda",
 }
 
@@ -174,7 +174,7 @@ def _complete(
         and int(effective.get("phase1_rounds", -1))
         == int(expected_overrides["phase1_rounds"])
         and score_modes_match
-        and abs(float(effective.get("alpha", -1.0)) - 0.5) < 1e-8
+        and abs(float(effective.get("svdd_lambda", -1.0)) - 0.5) < 1e-8
         and int(effective.get("num_clients", -1)) - int(effective.get("num_benign", -1))
         == expected_malicious
     )

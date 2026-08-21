@@ -275,7 +275,10 @@ def _load_records(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
             configured_num_malicious = int(overrides["num_malicious"])
             seed = int(overrides["seed"])
             score_mode = str(overrides["svdd_score_mode"])
-            alpha = float(overrides["alpha"])
+            lambda_value = overrides.get("svdd_lambda")
+            if lambda_value is None:
+                lambda_value = overrides["alpha"]
+            svdd_lambda = float(lambda_value)
         except (KeyError, TypeError, ValueError) as exc:
             malformed.append({"path": str(config_path), "reason": f"invalid config fields: {exc}"})
             continue
@@ -291,6 +294,7 @@ def _load_records(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
         record: dict[str, Any] = {
             "experiment_id": (
                 f"p1={phase1_rounds};M={num_malicious};mode={score_mode};"
+                f"lambda={svdd_lambda:g};"
                 f"seed={seed};attack={attack}"
             ),
             "config_path": str(config_path),
@@ -299,7 +303,7 @@ def _load_records(root: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]
             "task": task,
             "attack": attack,
             "score_mode": score_mode,
-            "alpha": alpha,
+            "svdd_lambda": svdd_lambda,
             "seed": seed,
             "phase1_rounds": phase1_rounds,
             "total_rounds": total_rounds,
@@ -389,8 +393,8 @@ def _result_summary_rows(
     return rows
 
 
-def _mode_label(mode: str, alpha: float) -> str:
-    return f"{mode} (α={alpha:g})"
+def _mode_label(mode: str, svdd_lambda: float) -> str:
+    return f"{mode} (λ={svdd_lambda:g})"
 
 
 def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[int]) -> str:
@@ -407,7 +411,7 @@ def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[
                     int(record["phase1_rounds"]),
                     int(record["num_malicious"]),
                     str(record["score_mode"]),
-                    float(record["alpha"]),
+                    float(record["svdd_lambda"]),
                 )
             ][int(record["seed"])] = record
 
@@ -415,7 +419,7 @@ def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[
         headers.extend(f"seed {seed}" for seed in seeds)
         headers.extend(["TACC 均值 ± SD", "完成"])
         tacc_rows: list[list[str]] = []
-        for (p1, malicious, mode, alpha), by_seed in sorted(
+        for (p1, malicious, mode, svdd_lambda), by_seed in sorted(
             grouped.items(), key=lambda item: (item[0][0], item[0][1], MODE_ORDER.index(item[0][2]))
         ):
             ordered = [by_seed.get(seed) for seed in seeds]
@@ -425,7 +429,7 @@ def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[
                     str(p1),
                     str(malicious),
                     _fmt_pct(malicious / 100.0, 0),
-                    _mode_label(mode, alpha),
+                    _mode_label(mode, svdd_lambda),
                     *[_seed_cell(record, "final_accuracy") for record in ordered],
                     _fmt_mean_std([_numeric(record.get("final_accuracy")) for record in completed]),
                     f"{len(completed)}/{len(seeds)}",
@@ -438,7 +442,7 @@ def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[
             detection_headers.extend([f"S{seed} TPR", f"S{seed} FPR"])
         detection_headers.extend(["TPR 均值 ± SD", "FPR 均值 ± SD", "完成"])
         detection_rows: list[list[str]] = []
-        for (p1, malicious, mode, alpha), by_seed in sorted(
+        for (p1, malicious, mode, svdd_lambda), by_seed in sorted(
             grouped.items(), key=lambda item: (item[0][0], item[0][1], MODE_ORDER.index(item[0][2]))
         ):
             ordered = [by_seed.get(seed) for seed in seeds]
@@ -452,7 +456,7 @@ def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[
                 [
                     str(p1),
                     str(malicious),
-                    _mode_label(mode, alpha),
+                    _mode_label(mode, svdd_lambda),
                     *seed_metrics,
                     _fmt_mean_std([_numeric(record.get("final_tpr")) for record in completed]),
                     _fmt_mean_std([_numeric(record.get("final_fpr")) for record in completed]),
@@ -466,7 +470,7 @@ def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[
             asr_headers.extend(f"seed {seed} ASR" for seed in seeds)
             asr_headers.extend(["ASR 均值 ± SD", "完成"])
             asr_rows: list[list[str]] = []
-            for (p1, malicious, mode, alpha), by_seed in sorted(
+            for (p1, malicious, mode, svdd_lambda), by_seed in sorted(
                 grouped.items(), key=lambda item: (item[0][0], item[0][1], MODE_ORDER.index(item[0][2]))
             ):
                 ordered = [by_seed.get(seed) for seed in seeds]
@@ -475,7 +479,7 @@ def _attack_detail_tables(records: Sequence[Mapping[str, Any]], seeds: Sequence[
                     [
                         str(p1),
                         str(malicious),
-                        _mode_label(mode, alpha),
+                        _mode_label(mode, svdd_lambda),
                         *[_seed_cell(record, "final_backdoor_asr") for record in ordered],
                         _fmt_mean_std(
                             [_numeric(record.get("final_backdoor_asr")) for record in completed]
@@ -684,7 +688,7 @@ def _report_markdown(
                 [
                     ["phase1_rounds", "5, 15, 30, 50", "第一阶段持续轮数"],
                     ["恶意参与方", "10, 20, 30, 40 / 100", "每轮固定参与的恶意客户端数"],
-                    ["score_mode / alpha", "recon / 0.0；combined / 0.5；svdd / 1.0", "两阶段均使用该筛选分数"],
+                    ["score_mode / lambda", "recon / 0.0；combined / 0.5；svdd / 1.0", "两阶段均使用该筛选分数"],
                     ["seed", ", ".join(map(str, seeds)), "独立重复"],
                     [
                         "攻击",

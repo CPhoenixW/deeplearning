@@ -29,7 +29,7 @@ def test_primary_matrix_has_816_jobs_and_ag_news_restriction(tmp_path) -> None:
     overrides = payload["fed_config_overrides"]
     assert overrides["phase1_score_mode"] == "recon"
     assert overrides["phase2_score_mode"] == "combined"
-    assert overrides["alpha"] == 0.5
+    assert overrides["svdd_lambda"] == 0.5
     assert "lie_z_override" not in overrides
     assert overrides["mixed_attack_types"] == "lf,bd,gn,sf,lie,minmax,minsum"
     assert overrides["total_rounds"] == 12

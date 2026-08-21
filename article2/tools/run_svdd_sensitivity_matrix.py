@@ -26,7 +26,7 @@ DEFAULT_MALICIOUS_RATIOS = (0.10, 0.20, 0.30, 0.40)
 DEFAULT_MODES = ("recon", "combined", "svdd")
 DEFAULT_SEEDS = (42, 43, 44)
 DEFAULT_ATTACKS = ("none", "gn", "lf", "sf", "bd", "lie", "mix")
-DEFAULT_ALPHA = 0.5
+DEFAULT_SVDD_LAMBDA = 0.5
 
 # AG News rank-1 calibration and the C002-derived defense/runtime protocol.
 BASE_OVERRIDES: dict[str, Any] = {
@@ -84,9 +84,9 @@ def _parse_ratios(value: str) -> tuple[float, ...]:
     return tuple(float(ratio) for ratio in ratios)
 
 
-def _factor_id(phase1_rounds: int, malicious_ratio: float, mode: str, alpha: float) -> str:
-    alpha_id = f"{alpha:g}".replace(".", "p")
-    return f"p1_{int(phase1_rounds):03d}/mal_{int(round(100 * malicious_ratio)):02d}/{mode}/alpha_{alpha_id}"
+def _factor_id(phase1_rounds: int, malicious_ratio: float, mode: str, svdd_lambda: float) -> str:
+    lambda_id = f"{svdd_lambda:g}".replace(".", "p")
+    return f"p1_{int(phase1_rounds):03d}/mal_{int(round(100 * malicious_ratio)):02d}/{mode}/lambda_{lambda_id}"
 
 
 def _result_path(output_dir: Path, task: str, attack: str) -> Path:
@@ -101,7 +101,7 @@ def _complete(
     phase1_rounds: int,
     malicious_ratio: float,
     mode: str,
-    alpha: float,
+    svdd_lambda: float,
     seed: int,
     rounds: int,
 ) -> bool:
@@ -127,7 +127,7 @@ def _complete(
         and int(effective.get("phase1_rounds", -1)) == int(phase1_rounds)
         and str(effective.get("phase1_score_mode", "")) == "recon"
         and str(effective.get("phase2_score_mode", "")) == mode
-        and abs(float(effective.get("alpha", -1.0)) - float(alpha)) < 1e-8
+        and abs(float(effective.get("svdd_lambda", -1.0)) - float(svdd_lambda)) < 1e-8
         and int(effective.get("seed", -1)) == int(seed)
         and (
             attack == "none"
@@ -144,12 +144,12 @@ def _write_config(
     phase1_rounds: int,
     malicious_ratio: float,
     mode: str,
-    alpha: float,
+    svdd_lambda: float,
     seed: int,
     attack: str,
     rounds: int,
 ) -> tuple[Path, Path]:
-    factor = _factor_id(phase1_rounds, malicious_ratio, mode, alpha)
+    factor = _factor_id(phase1_rounds, malicious_ratio, mode, svdd_lambda)
     output_dir = root / factor / f"seed_{seed}"
     config_path = root / "_configs" / factor / f"seed_{seed}" / f"{attack}.json"
     overrides = dict(BASE_OVERRIDES)
@@ -161,7 +161,7 @@ def _write_config(
             "num_malicious": int(round(100 * malicious_ratio)),
             "phase1_score_mode": "recon",
             "phase2_score_mode": mode,
-            "alpha": float(alpha),
+            "svdd_lambda": float(svdd_lambda),
         }
     )
     payload = {
@@ -187,7 +187,7 @@ def _build_jobs(
     phase1_rounds: Sequence[int],
     malicious_ratios: Sequence[float],
     modes: Sequence[str],
-    alpha: float,
+    svdd_lambda: float,
     seeds: Sequence[int],
     attacks: Sequence[str],
     rounds: int,
@@ -222,7 +222,7 @@ def _build_jobs(
                     phase1_rounds=p1,
                     malicious_ratio=ratio,
                     mode=mode,
-                    alpha=alpha,
+                    svdd_lambda=svdd_lambda,
                     seed=int(seed),
                     attack=attack,
                     rounds=rounds,
@@ -234,13 +234,13 @@ def _build_jobs(
                     phase1_rounds=p1,
                     malicious_ratio=ratio,
                     mode=mode,
-                    alpha=alpha,
+                    svdd_lambda=svdd_lambda,
                     seed=int(seed),
                     rounds=rounds,
                 ):
                     jobs.append(
                         (
-                            _factor_id(p1, ratio, mode, alpha),
+                            _factor_id(p1, ratio, mode, svdd_lambda),
                             attack,
                             config_path,
                             output_dir,
@@ -261,7 +261,7 @@ def main() -> int:
     parser.add_argument("--phase1-rounds", default=",".join(map(str, DEFAULT_PHASE1_ROUNDS)))
     parser.add_argument("--malicious-ratios", default=",".join(map(str, DEFAULT_MALICIOUS_RATIOS)))
     parser.add_argument("--modes", default=",".join(DEFAULT_MODES))
-    parser.add_argument("--alpha", type=float, default=DEFAULT_ALPHA)
+    parser.add_argument("--svdd-lambda", type=float, default=DEFAULT_SVDD_LAMBDA)
     parser.add_argument("--seeds", default=",".join(map(str, DEFAULT_SEEDS)))
     parser.add_argument("--attacks", default=",".join(DEFAULT_ATTACKS))
     parser.add_argument("--rounds", type=int, default=100)
@@ -298,8 +298,8 @@ def main() -> int:
         parser.error(f"Unsupported modes: {unknown_modes}")
     if min(phase1_rounds) < 1 or args.rounds < 1:
         parser.error("phase1 rounds and total rounds must be positive")
-    if not 0.0 <= float(args.alpha) <= 1.0:
-        parser.error("alpha must be in [0, 1]")
+    if not 0.0 <= float(args.svdd_lambda) <= 1.0:
+        parser.error("svdd-lambda must be in [0, 1]")
     if any(int(p1) >= int(args.rounds) for p1 in phase1_rounds):
         parser.error("each phase1 round count must be less than total rounds")
     if args.workers_per_gpu < 1 or args.omp_threads < 1:
@@ -319,7 +319,7 @@ def main() -> int:
         phase1_rounds=phase1_rounds,
         malicious_ratios=ratios,
         modes=modes,
-        alpha=float(args.alpha),
+        svdd_lambda=float(args.svdd_lambda),
         seeds=seeds,
         attacks=attacks,
         rounds=int(args.rounds),
