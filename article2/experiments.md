@@ -40,8 +40,19 @@ Task calibration is performed once with clean FedAvg using TACC only. The select
 | MNIST                         |             0.10 |                  1e-4 |
 | Fashion-MNIST                 |             0.10 |                     0 |
 | CIFAR-10                      |             0.05 |                  1e-4 |
-| COVID-19 Radiography Database | To be calibrated |      To be calibrated |
+| COVID-19 Radiography Database |             0.005 |              0.0005 |
 | AG News                       |             0.10 |                     0 |
+
+For the implementation preflight, a separate global smoke test covers all five
+datasets (`mnist`, `fashion_mnist`, `cifar10`, `covid19`, and `ag_news`) with
+5 clients, 2 malicious clients, 5 communication rounds, one local epoch, and
+batch size 64. It exercises every registered defense (`avg`, `tm`, `mk`,
+`lasa`, `seca`, `bnguard`, `dmc`, `svdd`, `fld`, `alignins`, `flgmm`, and
+`flanders`) against `none`, `lf`, `gn`, `sf`, `bd`, `lie`, `minmax`, and
+`minsum`; Mix is excluded from this preflight. The SVDD smoke override uses
+Phase 1 for 3 rounds and Phase 2 for the remaining 2 rounds (`P1=3`, `P2=2`).
+This is a compatibility check only and does not replace the primary 100/300-
+round protocol.
 
 ### 4.1.3 Attack Settings
 
@@ -104,7 +115,7 @@ This section reports the results using the same task, partition, attack, defense
 
 The primary matrix compares the eight primary defenses under the supported attacks. The portrait Word table groups conditions as Data Poisoning (LF), Byzantine Poisoning (GN, SF, LIE, Min-Max), Backdoor Attacks (BD, DBA), and Mix (M1, M2). `Min-Max`, `DBA`, and `M2` remain explicit columns and must be marked pending or `N/A` unless matched result files exist. `ACC` denotes TACC; `ASR` is reported for BD/DBA and the corresponding mixed conditions.
 
-![image-20260813123444341](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813123444341.png)
+![Global model utility and attack suppression](assets/table-global-model-utility.png)
 
 
 
@@ -112,7 +123,7 @@ The primary matrix compares the eight primary defenses under the supported attac
 
 Detection is evaluated independently from global utility. The compact portrait Word table reports DAR / DPR / RR in every selected attack column. The complete analysis additionally retains FPR, F1, AUROC, AUPRC, accepted-client fraction, selected rejection ratio, candidate validation accuracies, losses, and mixed-attack per-family recall.
 
-![image-20260813123558677](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813123558677.png)
+![Malicious client detection](assets/table-client-detection.png)
 
 
 
@@ -126,7 +137,7 @@ Sweep `alpha` in `{0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8}`. Values 0 and 1 may be in
 
 类似这张图
 
-![image-20260813175412787](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813175412787.png)
+![Loss coefficient sensitivity example](assets/sensitivity-example.png)
 
 ### 5.2.2 Phase-1 Duration
 
@@ -134,7 +145,7 @@ Sweep `phase1_rounds` in `{5, 15, 30, 50}` with total rounds fixed at 100 for sc
 
 类似这种图
 
-![image-20260813175439928](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813175439928.png)
+![Phase-1 duration sensitivity example](assets/sensitivity-example.png)
 
 ### 5.2.3 Trusted Validation-Set Size
 
@@ -142,7 +153,7 @@ Vary the direct sample count `server_validation_size` in `{10, 25, 50, 100, 200}
 
 类似这种图
 
-![image-20260813175452472](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813175452472.png)
+![Trusted validation-set sensitivity example](assets/sensitivity-example.png)
 
 ### 5.2.4 Latent Representation Dimension
 
@@ -150,7 +161,7 @@ Sweep `latent_dim` in `{16, 32, 64, 128}` while keeping the input descriptor dim
 
 类似这种图
 
-![image-20260813175509260](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813175509260.png)
+![Latent representation sensitivity example](assets/sensitivity-example.png)
 
 ## 5.3 Robustness Analysis
 
@@ -160,13 +171,13 @@ Robustness factors are environment or attacker factors, not AE-SVDD training hyp
 
 Use malicious ratios of 10%, 20%, 30%, and 40%, with a 0% clean control. Keep `num_clients=100` and adjust `num_malicious` accordingly. A 50% boundary point may be shown separately, but it is outside the benign-majority claim.
 
-![image-20260812233721071](/Users/phoenixw/Documents/article2/assets/image-20260812233721071.png)
+![Malicious-client ratio](assets/malicious-client-ratio.png)
 
 ### 5.3.2 Data Heterogeneity
 
 Compare IID (`dirichlet_alpha=null`) with Dirichlet alpha values 1.0, 0.5, and 0.1, using 100 clients and 30% malicious clients. Report benign FPR separately from malicious RR so normal client drift is not mistaken for attack detection.
 
-![image-20260812233911510](/Users/phoenixw/Documents/article2/assets/image-20260812233911510.png)
+![Data heterogeneity](assets/data-heterogeneity.png)
 
 
 
@@ -186,7 +197,7 @@ The experiment retains exactly three configurations. The names P1-only, P2-only,
 
 P1-only always uses reconstruction error. P2-only always uses the combined reconstruction-error plus SVDD-distance score. Full uses reconstruction error in Phase 1 and the combined score in Phase 2. Run the ablation only on Fashion-MNIST with malicious-client ratios of 10%, 20%, 30%, and 40%, using LF, GN, SF, and BD with seeds 42--44. LF, GN, and SF report DAR / ACC; BD reports DAR / ASR.
 
-![image-20260813181505537](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813181505537.png)
+![Two-stage ranking ablation](assets/ablation-two-stage-ranking.png)
 
 ## 5.5 Computational Overhead
 
@@ -196,6 +207,6 @@ For AE-SVDD, separate client local training, descriptor construction, AE/SVDD up
 
 类似这种表
 
-![image-20260813175824204](/Users/phoenixw/Library/Application Support/typora-user-images/image-20260813175824204.png)
+![Computational overhead](assets/computational-overhead.png)
 
 All conclusions must be based on complete result files with the expected round count. Failures are summarized separately in the reproducibility appendix rather than silently removed.
