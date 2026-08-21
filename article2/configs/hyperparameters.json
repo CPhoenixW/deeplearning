@@ -96,8 +96,8 @@
       "client_weight_decay": 0.0001
     },
     "covid19": {
-      "client_lr": 0.001,
-      "client_weight_decay": 0.0,
+      "client_lr": 0.005,
+      "client_weight_decay": 0.0005,
       "class_weight_mode": "none",
       "client_sampling_mode": "balanced",
       "local_epochs": 10
