@@ -80,10 +80,10 @@ def _write_config(root: Path, mode: str, seed: int, rounds: int) -> tuple[Path, 
     return config, output, result
 
 
-def _run_one(python_bin: str, script: Path, config: Path, output: Path) -> int:
+def _run_one(python_bin: str, script: Path, config: Path, output: Path, gpu: int) -> int:
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    env.update({"CUDA_VISIBLE_DEVICES": "2", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
+    env.update({"CUDA_VISIBLE_DEVICES": str(gpu), "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"})
     command = [python_bin, "-u", str(script), "--config", str(config)]
     with (output / "console.log").open("w", encoding="utf-8") as stream:
         return subprocess.run(command, cwd=str(script.parent), env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
@@ -117,21 +117,35 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seeds", default="42")
     parser.add_argument("--rounds", type=int, default=300)
-    parser.add_argument("--output-root", type=Path, default=Path("log/fashion_svdd_input_compare_bd_gpu2"))
+    parser.add_argument("--gpus", default="0,1,2")
+    parser.add_argument("--workers-per-gpu", type=int, default=2)
+    parser.add_argument("--output-root", type=Path, default=Path("log/fashion_svdd_input_compare_bd_3gpu"))
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args()
     seeds = tuple(int(item) for item in args.seeds.split(",") if item.strip())
     if not seeds or args.rounds < 2:
         parser.error("seeds must be non-empty and rounds must be at least 2")
+    gpus = tuple(int(item) for item in args.gpus.split(",") if item.strip())
+    if not gpus or args.workers_per_gpu < 1:
+        parser.error("gpus must be non-empty and workers-per-gpu must be positive")
 
     root = args.output_root.resolve()
     script = (Path(__file__).resolve().parents[1] / "svdd_test.py").resolve()
     jobs = [_write_config(root, mode, seed, args.rounds) for mode in MODES for seed in seeds]
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(_run_one, str(args.python), script, config, output) for config, output, _ in jobs]
+    worker_count = len(gpus) * args.workers_per_gpu
+    assigned = [
+        (config, output, gpu)
+        for index, (config, output, _result) in enumerate(jobs)
+        for gpu in (gpus[(index // args.workers_per_gpu) % len(gpus)],)
+    ]
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [
+            pool.submit(_run_one, str(args.python), script, config, output, gpu)
+            for config, output, gpu in assigned
+        ]
         codes = [future.result() for future in futures]
     summary = _summarize(root, seeds, args.rounds)
-    print(f"summary={summary}")
+    print(f"summary={summary} workers={worker_count} gpus={gpus}")
     return 1 if any(codes) else 0
 
 
