@@ -54,8 +54,9 @@ def _overrides(rounds: int) -> dict[str, Any]:
         "phase1_score_mode": "recon",
         "phase2_score_mode": "combined",
         "svdd_lambda": 0.5,
-        "param_descriptor_dim": 4096,
-        "param_descriptor_device": "cuda",
+        "svdd_input_mode": "absolute",
+        "svdd_input_dim": 4096,
+        "svdd_normalization_eps": 1e-6,
         "device": "cuda",
     }
 

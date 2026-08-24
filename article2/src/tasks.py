@@ -80,17 +80,6 @@ class FederatedTask(ABC):
     ) -> Tuple[List[DataLoader], DataLoader, DataLoader]:
         """Client loaders, fixed clean validation loader, and test loader."""
 
-    def extract_svdd_features(self, config: FedConfig, state_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Flattened vector for SVDD / AE (default: BatchNorm buffers + γ/β)."""
-
-        try:
-            from .utils import extract_bn_features
-        except ImportError:
-            from utils import extract_bn_features
-
-        return extract_bn_features(state_dict)
-
-
 class Cifar10Task(FederatedTask):
     name = "cifar10"
     num_classes = 10
@@ -548,18 +537,6 @@ class AGNewsTask(FederatedTask):
         return _split_train_test_loaders(
             config, train_dataset, train_dataset, test_dataset, self.num_classes
         )
-
-    def extract_svdd_features(self, config: FedConfig, state_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Use Transformer LayerNorm (and optionally BN head) for SVDD — richer than BN-only."""
-
-        try:
-            from .utils import extract_ag_news_svdd_features
-        except ImportError:
-            from utils import extract_ag_news_svdd_features
-
-        mode = getattr(config, "ag_news_svdd_features", "ln_bn")
-        return extract_ag_news_svdd_features(state_dict, mode)
-
 
 def _dataset_train_labels(dataset: Dataset) -> torch.Tensor:
     if hasattr(dataset, "targets"):

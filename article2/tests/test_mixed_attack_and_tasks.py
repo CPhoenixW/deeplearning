@@ -2,7 +2,6 @@ import torch
 
 from src.attacks import ATTACK_REGISTRY, mixed_attack_for_client
 from src.config import FedConfig, normalize_attack_name
-from src.fixed_descriptor import FixedHierarchicalMultiViewDescriptor
 from src.models import FashionCNN, LeNetClassifier
 from src.tasks import TASK_REGISTRY
 from src.defenses import DEFENSE_REGISTRY
@@ -26,7 +25,7 @@ def test_mnist_task_is_registered():
     assert "mnist" in TASK_REGISTRY
 
 
-def test_grayscale_tasks_use_distinct_native_models_and_fixed_descriptor():
+def test_grayscale_tasks_use_distinct_native_models():
     expected_models = {
         "mnist": LeNetClassifier,
         "fashion_mnist": FashionCNN,
@@ -45,20 +44,6 @@ def test_grayscale_tasks_use_distinct_native_models_and_fixed_descriptor():
             for module in model.modules()
         )
 
-        reference = {
-            key: value.detach().cpu().clone()
-            for key, value in model.state_dict().items()
-        }
-        descriptor = FixedHierarchicalMultiViewDescriptor(
-            reference,
-            parameter_names=[name for name, _ in model.named_parameters()],
-            output_dim=64,
-            seed=7,
-        )
-        assert torch.equal(
-            descriptor.describe(reference, reference),
-            torch.zeros(64),
-        )
     assert parameter_counts["fashion_mnist"] > parameter_counts["mnist"]
 
 
@@ -69,15 +54,14 @@ def test_modular_pipeline_registry_and_hyperparameters():
         defense.__module__.startswith("src.defenses.")
         for defense in DEFENSE_REGISTRY.values()
     )
-    assert FedConfig().svdd_feature_mode == "fixed_projection"
+    assert FedConfig().svdd_input_mode == "absolute"
+    assert FedConfig().svdd_input_dim == 4096
     table = load_hyperparameter_table("configs/hyperparameters.json")
     values = resolve_hyperparameters(table, "lf", "svdd", "cifar10")
-    assert values["svdd_feature_mode"] == "fixed_projection"
+    assert values["svdd_input_mode"] == "absolute"
+    assert values["svdd_input_dim"] == 4096
     assert values["svdd_lambda"] == 0.5
-    assert "ag_news_svdd_features" not in values
-    assert values["param_descriptor_global_ratio"] == 0.5
-    assert values["param_descriptor_layer_ratio"] == 0.375
-    assert values["param_descriptor_statistics_ratio"] == 0.125
+    assert "svdd_normalization_eps" in values
     assert values["center_init_quantile"] == 0.5
     assert values["phase2_recon_quantile"] == 0.8
 

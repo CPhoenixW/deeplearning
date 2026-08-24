@@ -15,16 +15,17 @@ from src.defenses import DefenseContext, SVDDDefense
 class _TinyModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.fc = nn.Linear(4, 2)
+        self.feature = nn.Linear(64, 64)
+        self.fc = nn.Linear(64, 2)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.fc(inputs)
+        return self.fc(torch.relu(self.feature(inputs)))
 
 
 def test_both_phases_use_validation_topk_and_svdd_lambda() -> None:
     torch.manual_seed(7)
     validation = DataLoader(
-        TensorDataset(torch.randn(64, 4), torch.randint(0, 2, (64,))),
+        TensorDataset(torch.randn(64, 64), torch.randint(0, 2, (64,))),
         batch_size=16,
     )
     config = FedConfig(
@@ -32,15 +33,12 @@ def test_both_phases_use_validation_topk_and_svdd_lambda() -> None:
         num_benign=4,
         phase1_rounds=1,
         latent_dim=4,
-        param_descriptor_dim=64,
-        param_descriptor_device="cpu",
-        svdd_feature_mode="fixed_projection",
         device="cpu",
         svdd_lambda=0.25,
     )
     server = SVDDDefense(
         config,
-        d_bn=64,
+        d_bn=4096,
         device=torch.device("cpu"),
         model_fn=_TinyModel,
         validation_loader=validation,
@@ -63,11 +61,11 @@ def test_both_phases_use_validation_topk_and_svdd_lambda() -> None:
         assert result.phase in {"warmup", "filtering"}
         assert len(result.server_metrics["validation_candidates"]) == 5
         assert result.server_metrics["selected_reject_ratio"] in {
-            0.0,
             0.1,
             0.2,
             0.3,
             0.4,
+            0.5,
         }
         assert int(result.m.sum().item()) in {2, 3, 4}
     expected = phase2.svdd_loss * 0.25 + phase2.recon_loss * 0.75
@@ -81,18 +79,15 @@ def test_validation_ties_choose_largest_rejection_ratio() -> None:
         num_clients=5,
         num_benign=4,
         latent_dim=4,
-        param_descriptor_dim=64,
-        param_descriptor_device="cpu",
-        svdd_feature_mode="fixed_projection",
         device="cpu",
     )
     validation = DataLoader(
-        TensorDataset(torch.zeros(10, 4), torch.zeros(10, dtype=torch.long)),
+        TensorDataset(torch.zeros(10, 64), torch.zeros(10, dtype=torch.long)),
         batch_size=10,
     )
     server = SVDDDefense(
         config,
-        d_bn=64,
+        d_bn=4096,
         device=torch.device("cpu"),
         model_fn=_TinyModel,
         validation_loader=validation,
@@ -106,26 +101,23 @@ def test_validation_ties_choose_largest_rejection_ratio() -> None:
     )
 
     assert set(candidates.values()) == {candidates["0.10"]}
-    assert selected_ratio == 0.4
+    assert selected_ratio == 0.5
 
 
-def test_zero_rejection_can_win_validation_selection() -> None:
+def test_minimum_rejection_can_win_validation_selection() -> None:
     config = FedConfig(
         num_clients=5,
         num_benign=5,
         latent_dim=4,
-        param_descriptor_dim=64,
-        param_descriptor_device="cpu",
-        svdd_feature_mode="fixed_projection",
         device="cpu",
     )
     validation = DataLoader(
-        TensorDataset(torch.zeros(10, 4), torch.zeros(10, dtype=torch.long)),
+        TensorDataset(torch.zeros(10, 64), torch.zeros(10, dtype=torch.long)),
         batch_size=10,
     )
     server = SVDDDefense(
         config,
-        d_bn=64,
+        d_bn=4096,
         device=torch.device("cpu"),
         model_fn=_TinyModel,
         validation_loader=validation,
@@ -144,8 +136,8 @@ def test_zero_rejection_can_win_validation_selection() -> None:
     )
 
     assert len(calls) == 5
-    assert set(candidates) == {"0.00", "0.10", "0.20", "0.30", "0.40"}
-    assert selected_ratio == 0.0
+    assert set(candidates) == {"0.10", "0.20", "0.30", "0.40", "0.50"}
+    assert selected_ratio == 0.1
 
 
 def test_phase_scores_are_independent_from_svdd_lambda() -> None:
@@ -156,17 +148,28 @@ def test_phase_scores_are_independent_from_svdd_lambda() -> None:
         num_clients=5,
         num_benign=5,
         latent_dim=4,
-        param_descriptor_dim=64,
-        param_descriptor_device="cpu",
-        svdd_feature_mode="fixed_projection",
         device="cpu",
     )
     server = SVDDDefense(
         config,
-        d_bn=64,
+        d_bn=4096,
         device=torch.device("cpu"),
         model_fn=_TinyModel,
     )
     assert server.phase1_score_mode == "recon"
     assert server.phase2_score_mode == "combined"
     assert config.svdd_lambda == 0.5
+
+
+def test_configured_latent_dimension_is_preserved() -> None:
+    config = FedConfig(
+        latent_dim=512,
+        device="cpu",
+    )
+    server = SVDDDefense(
+        config,
+        d_bn=4096,
+        device=torch.device("cpu"),
+        model_fn=_TinyModel,
+    )
+    assert server.ae.encoder.net[-1].out_features == 512

@@ -113,23 +113,12 @@ class FedConfig:
     ae_lr: float = 1e-3
     ae_weight_decay: float = 1e-6
     ae_grad_clip: float = 1.0
-    # Input representation for the optional task-specific feature fallback.
-    # The default fixed descriptor always describes client model deltas.
-    svdd_input_mode: str = "delta"
-    # Feature interface before AE-SVDD:
-    # - "fixed_projection": fixed hierarchical multi-view Phi(delta W), default.
-    # - "task": optional task-specific BN / LayerNorm fallback for old studies.
-    svdd_feature_mode: str = "fixed_projection"
-    param_descriptor_dim: int = 4096
-    param_descriptor_seed: int = 2027
-    # Fixed descriptor view allocation. Ratios must be non-negative and sum to 1.
-    # Zero-valued views support controlled structural ablations.
-    param_descriptor_global_ratio: float = 0.5
-    param_descriptor_layer_ratio: float = 0.375
-    param_descriptor_statistics_ratio: float = 0.125
-    # "cpu" is deterministic; "cuda" is faster but scatter reductions can have
-    # small floating-point ordering differences. "auto" follows the run device.
-    param_descriptor_device: str = "cpu"
+    # Unified direct-parameter input. ``absolute`` uses client weights and
+    # ``delta`` uses client weights minus the pre-round global weights. Both
+    # modes select exactly 4096 trainable coordinates and use mean/std scaling.
+    svdd_input_mode: str = "absolute"
+    svdd_input_dim: int = 4096
+    svdd_normalization_eps: float = 1e-6
 
     # --- Phase schedule ---
     phase1_rounds: int = 15
@@ -197,14 +186,10 @@ class FedConfig:
     # reconstruction training. Values must be in (0, 1].
     center_init_quantile: float = 0.5
     phase2_recon_quantile: float = 0.8
-    svdd_feature_clip: float = 10.0
 
     # --- Task (dataset + backbone) ---
     # task_name keys must exist in tasks.TASK_REGISTRY, e.g. "cifar10", "covid19", "ag_news"
     task_name: str = "cifar10"
-    # Optional AG News feature fallback, used only when svdd_feature_mode="task".
-    # The default fixed descriptor does not read this field.
-    ag_news_svdd_features: str = "ln_bn"
     # Set automatically from the task in main.run_federated; used by label-flip etc.
     num_classes: int = 10
 

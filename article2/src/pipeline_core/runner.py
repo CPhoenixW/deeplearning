@@ -211,20 +211,12 @@ def _feature_dimension(context: PipelineContext) -> int:
     config = context.config
     if context.defense_name != "svdd":
         return 1
-    feature_mode = str(config.svdd_feature_mode).lower().strip()
-    if feature_mode == "fixed_projection":
-        dimension = int(config.param_descriptor_dim)
-        if dimension < 64:
-            raise ValueError("param_descriptor_dim must be at least 64")
-        return dimension
-    if feature_mode != "task":
-        raise ValueError(
-            f"Unknown svdd_feature_mode {config.svdd_feature_mode!r}; "
-            "use 'task' or 'fixed_projection'"
-        )
-    with torch.random.fork_rng(devices=[]):
-        state = context.task.build_model().state_dict()
-    return int(context.task.extract_svdd_features(config, state).numel())
+    if str(config.svdd_input_mode).lower().strip() not in {"absolute", "delta"}:
+        raise ValueError("svdd_input_mode must be 'absolute' or 'delta'.")
+    dimension = int(config.svdd_input_dim)
+    if dimension != 4096:
+        raise ValueError("svdd_input_dim is fixed at 4096 for the unified SVDD protocol.")
+    return dimension
 
 
 def _create_defense(context: PipelineContext):
@@ -243,9 +235,6 @@ def _create_defense(context: PipelineContext):
     }
     if context.defense_name == "svdd":
         kwargs["validation_loader"] = context.validation_loader
-        kwargs["svdd_feature_extractor"] = lambda state: (
-            context.task.extract_svdd_features(context.config, state)
-        )
     return defense_cls(**kwargs), model_fn
 
 
