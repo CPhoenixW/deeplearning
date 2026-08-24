@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare direct absolute-parameter and delta SVDD inputs on Fashion-MNIST."""
+"""Compare absolute-weight and delta-weight 4096-D descriptor SVDD inputs."""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ BASE_OVERRIDES = {
     "ae_grad_clip": 1.0,
     "svdd_input_dim": 4096,
     "svdd_normalization_eps": 1e-6,
+    "svdd_descriptor_device": "cuda",
     "phase1_rounds": 15,
     "phase1_score_mode": "recon",
     "phase2_score_mode": "combined",

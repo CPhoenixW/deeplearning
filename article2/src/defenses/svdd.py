@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 
 from ..config import FedConfig
+from ..fixed_descriptor import FixedHierarchicalMultiViewDescriptor
 from ..models import AutoEncoder
 from ..utils import (
     weighted_fedavg,
@@ -74,11 +75,31 @@ class SVDDDefense(BaseDefense):
             raise ValueError("svdd_input_mode must be 'absolute' or 'delta'.")
         self.input_dim = int(config.svdd_input_dim)
         if self.input_dim != 4096:
-            raise ValueError("svdd_input_dim is fixed at 4096 for the unified SVDD protocol.")
+            raise ValueError("svdd_input_dim must remain 4096 for the fixed descriptor.")
         self.normalization_eps = float(config.svdd_normalization_eps)
         if not math.isfinite(self.normalization_eps) or self.normalization_eps <= 0.0:
             raise ValueError("svdd_normalization_eps must be positive and finite.")
-        self._parameter_indices = self._build_parameter_indices()
+        descriptor_device = str(getattr(config, "svdd_descriptor_device", "auto")).lower().strip()
+        if descriptor_device == "auto":
+            projection_device = self.device if self.device.type == "cuda" else torch.device("cpu")
+        else:
+            projection_device = torch.device(descriptor_device)
+        if projection_device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("svdd_descriptor_device requests CUDA, but CUDA is unavailable.")
+        reference = self.state_dict_for_clients()
+        self._zero_reference = {
+            name: torch.zeros_like(reference[name]) for name in self.param_names
+        }
+        self.descriptor = FixedHierarchicalMultiViewDescriptor(
+            reference,
+            parameter_names=self.param_names,
+            output_dim=self.input_dim,
+            seed=int(getattr(config, "svdd_descriptor_seed", 2027)),
+            projection_device=projection_device,
+            global_ratio=float(getattr(config, "svdd_descriptor_global_ratio", 0.5)),
+            layer_ratio=float(getattr(config, "svdd_descriptor_layer_ratio", 0.375)),
+            statistics_ratio=float(getattr(config, "svdd_descriptor_statistics_ratio", 0.125)),
+        )
         # Keep the configured latent dimension so the sensitivity sweep can
         # evaluate both compressed and overcomplete representations.
         latent_dim = int(config.latent_dim)
@@ -92,55 +113,6 @@ class SVDDDefense(BaseDefense):
         self.optimizer_ae = torch.optim.Adam(
             self.ae.parameters(), lr=config.ae_lr, weight_decay=config.ae_weight_decay
         )
-
-    def _build_parameter_indices(self) -> Tensor:
-        """Select exactly 4096 deterministic, layer-balanced parameter coordinates."""
-
-        sizes = [
-            int(parameter.numel())
-            for name, parameter in self.global_model.named_parameters()
-            if name in self.param_names and parameter.requires_grad
-        ]
-        total = sum(sizes)
-        if total < self.input_dim:
-            raise ValueError(
-                f"The model has only {total:,} trainable parameters; "
-                f"at least {self.input_dim:,} are required."
-            )
-
-        raw_quotas = [self.input_dim * size / total for size in sizes]
-        quotas = [min(size, int(quota)) for size, quota in zip(sizes, raw_quotas)]
-        remainder = self.input_dim - sum(quotas)
-        order = sorted(
-            range(len(sizes)),
-            key=lambda index: raw_quotas[index] - quotas[index],
-            reverse=True,
-        )
-        for index in order:
-            if remainder == 0:
-                break
-            if quotas[index] < sizes[index]:
-                quotas[index] += 1
-                remainder -= 1
-        if remainder:
-            raise RuntimeError("Could not allocate the fixed SVDD input dimension.")
-
-        indices: list[Tensor] = []
-        offset = 0
-        for size, quota in zip(sizes, quotas):
-            if quota:
-                if quota == size:
-                    local = torch.arange(size, dtype=torch.long)
-                elif quota == 1:
-                    local = torch.tensor([(size - 1) // 2], dtype=torch.long)
-                else:
-                    local = torch.linspace(0, size - 1, quota).round().long()
-                indices.append(local + offset)
-            offset += size
-        result = torch.cat(indices)
-        if result.numel() != self.input_dim or result.unique().numel() != self.input_dim:
-            raise RuntimeError("SVDD parameter coordinate selection is not unique.")
-        return result
 
     @classmethod
     def _normalize_score_mode(cls, value: object, field_name: str) -> str:
@@ -296,27 +268,14 @@ class SVDDDefense(BaseDefense):
     def _build_input_matrix(
         self, client_state_dicts: List[Dict[str, Tensor]]
     ) -> Tensor:
-        """Build a fixed-width absolute-parameter or parameter-delta matrix."""
+        """Map full client weights or updates into the fixed 4096-D descriptor."""
 
-        reference = self.state_dict_for_clients() if self.input_mode == "delta" else None
-        rows: list[Tensor] = []
-        for state_dict in client_state_dicts:
-            parts: list[Tensor] = []
-            for name in self.param_names:
-                value = state_dict[name]
-                if not value.is_floating_point():
-                    raise TypeError(f"Trainable parameter {name!r} is not floating point.")
-                current = value.detach().cpu().float().reshape(-1)
-                if reference is not None:
-                    current = current - reference[name].detach().cpu().float().reshape(-1)
-                parts.append(current)
-            if not parts:
-                raise ValueError("The model has no floating-point trainable parameters.")
-            rows.append(torch.cat(parts))
-        if not rows:
-            raise ValueError("SVDD requires at least one client parameter state.")
-        full = torch.stack(rows, dim=0)
-        return full.index_select(1, self._parameter_indices)
+        reference = (
+            self.state_dict_for_clients()
+            if self.input_mode == "delta"
+            else self._zero_reference
+        )
+        return self.descriptor.describe_many(client_state_dicts, reference)
 
     def _scale_input_matrix(self, raw: Tensor) -> Tuple[Tensor, Tensor]:
         """Apply finite-client feature-wise mean/std normalization."""

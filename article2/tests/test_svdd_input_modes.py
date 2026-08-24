@@ -1,10 +1,9 @@
-"""Tests for the unified 4096-dim direct-parameter SVDD inputs."""
+"""Tests for the 4096-D fixed-descriptor SVDD inputs."""
 
 from __future__ import annotations
 
 import copy
 
-import pytest
 import torch
 from torch import nn
 
@@ -12,11 +11,11 @@ from src.config import FedConfig
 from src.defenses import SVDDDefense
 
 
-class _LargeEnoughModel(nn.Module):
+class _SmallModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
-        self.feature = nn.Linear(64, 64)
-        self.fc = nn.Linear(64, 2)
+        self.feature = nn.Linear(4, 3)
+        self.fc = nn.Linear(3, 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.fc(torch.relu(self.feature(x)))
@@ -29,13 +28,14 @@ def _server(mode: str) -> SVDDDefense:
         latent_dim=8,
         svdd_input_mode=mode,
         svdd_input_dim=4096,
+        svdd_descriptor_device="cpu",
         device="cpu",
     )
     return SVDDDefense(
         config,
         d_bn=4096,
         device=torch.device("cpu"),
-        model_fn=_LargeEnoughModel,
+        model_fn=_SmallModel,
     )
 
 
@@ -53,7 +53,7 @@ def _clients(reference: dict[str, torch.Tensor], k: int = 5) -> list[dict[str, t
     return states
 
 
-def test_absolute_and_delta_share_the_same_4096_coordinates() -> None:
+def test_both_modes_return_a_4096_dimensional_descriptor() -> None:
     absolute = _server("absolute")
     delta = _server("delta")
     delta.global_model.load_state_dict(absolute.global_model.state_dict())
@@ -62,27 +62,27 @@ def test_absolute_and_delta_share_the_same_4096_coordinates() -> None:
 
     x_absolute = absolute._build_input_matrix(clients)
     x_delta = delta._build_input_matrix(clients)
-    full_reference = torch.cat(
-        [reference[name].float().reshape(-1) for name in absolute.param_names]
-    )
-    expected_delta = x_absolute - full_reference.index_select(0, absolute._parameter_indices)
+    expected_absolute = absolute.descriptor.describe_many(clients, absolute._zero_reference)
+    expected_delta = delta.descriptor.describe_many(clients, reference)
+
     assert x_absolute.shape == (5, 4096)
-    assert torch.allclose(x_delta, expected_delta, atol=1e-6)
+    assert x_delta.shape == (5, 4096)
+    assert torch.allclose(x_absolute, expected_absolute)
+    assert torch.allclose(x_delta, expected_delta)
+    assert not torch.allclose(x_absolute, x_delta)
 
 
-def test_mean_std_normalization_is_shift_invariant_between_modes() -> None:
-    absolute = _server("absolute")
-    delta = _server("delta")
-    delta.global_model.load_state_dict(absolute.global_model.state_dict())
-    reference = absolute.state_dict_for_clients()
+def test_descriptor_is_deterministic() -> None:
+    first = _server("absolute")
+    second = _server("absolute")
+    reference = first.state_dict_for_clients()
     clients = _clients(reference)
+    second.global_model.load_state_dict(reference)
 
-    x_absolute, finite_absolute = absolute._scale_input_matrix(
-        absolute._build_input_matrix(clients)
+    assert torch.equal(
+        first._build_input_matrix(clients),
+        second._build_input_matrix(clients),
     )
-    x_delta, finite_delta = delta._scale_input_matrix(delta._build_input_matrix(clients))
-    assert torch.equal(finite_absolute, finite_delta)
-    assert torch.allclose(x_absolute, x_delta, atol=1e-5, rtol=1e-5)
 
 
 def test_nonfinite_client_is_excluded_from_mean_std() -> None:
@@ -99,11 +99,7 @@ def test_nonfinite_client_is_excluded_from_mean_std() -> None:
     assert bool(torch.isfinite(normalized).all().item())
 
 
-def test_models_with_fewer_than_4096_parameters_fail_fast() -> None:
-    with pytest.raises(ValueError, match="at least 4096"):
-        SVDDDefense(
-            FedConfig(device="cpu"),
-            d_bn=4096,
-            device=torch.device("cpu"),
-            model_fn=lambda: nn.Linear(4, 2),
-        )
+def test_models_smaller_than_4096_parameters_are_supported() -> None:
+    server = _server("absolute")
+    assert sum(parameter.numel() for parameter in server.global_model.parameters()) < 4096
+    assert server.descriptor.layout.output_dim == 4096

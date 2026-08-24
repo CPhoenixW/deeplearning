@@ -9,6 +9,11 @@
     "svdd_input_mode": "absolute",
     "svdd_input_dim": 4096,
     "svdd_normalization_eps": 0.000001,
+    "svdd_descriptor_seed": 2027,
+    "svdd_descriptor_device": "auto",
+    "svdd_descriptor_global_ratio": 0.5,
+    "svdd_descriptor_layer_ratio": 0.375,
+    "svdd_descriptor_statistics_ratio": 0.125,
     "phase1_rounds": 15
   },
   "defenses": {
