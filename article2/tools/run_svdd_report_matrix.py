@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Run the approved AE-SVDD sensitivity and malicious-ratio robustness matrix."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from typing import Any
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TASKS = ("mnist", "fashion_mnist", "cifar10", "ag_news")
+IMAGE_TASKS = {"mnist", "fashion_mnist", "cifar10"}
+IMAGE_ATTACKS = ("gn", "sf", "lf", "bd", "lie")
+AG_NEWS_ATTACKS = ("gn", "sf", "lf", "lie")
+SEEDS = (42, 43, 44)
+
+BASE_OVERRIDES: dict[str, Any] = {
+    "num_clients": 100,
+    "num_malicious": 30,
+    "total_rounds": 300,
+    "server_validation_size": 50,
+    "latent_dim": 64,
+    "local_epochs": 1,
+    "batch_size": 64,
+    "num_workers": 0,
+    "use_amp": False,
+    "channels_last": False,
+    "cuda_aggregation": True,
+    "reuse_client_model": True,
+    "skip_redundant_attack_training": True,
+    "client_batch_group_size": 1,
+    "round_diagnostics": False,
+    "dirichlet_alpha": 1.0,
+    "hf_datasets_offline": True,
+    "svdd_input_mode": "absolute",
+    "svdd_input_dim": 4096,
+    "svdd_normalization": "median_mad",
+    "svdd_normalization_eps": 1e-6,
+    "svdd_descriptor_device": "cuda",
+    "phase1_rounds": 15,
+    "phase1_score_mode": "recon",
+    "phase2_score_mode": "combined",
+    "svdd_lambda": 0.5,
+    "center_ema_decay": 0.9,
+    "svdd_grad_clip": 1.0,
+    "center_init_quantile": 0.5,
+    "phase2_recon_quantile": 0.8,
+    "device": "cuda",
+}
+
+
+def _parameter_specs() -> list[tuple[str, str, dict[str, Any]]]:
+    specs: list[tuple[str, str, dict[str, Any]]] = []
+    for value in (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8):
+        specs.append(("lambda", f"lambda_{value:.1f}".replace(".", "p"), {"svdd_lambda": value}))
+    for value in (5, 15, 30, 50, 100):
+        specs.append(("phase1", f"phase1_{value:03d}", {"phase1_rounds": value}))
+    for value in (10, 25, 50, 100, 200):
+        specs.append(("trust", f"trust_{value:03d}", {"server_validation_size": value}))
+    for value in (16, 32, 64, 128):
+        specs.append(("latent", f"latent_{value:03d}", {"latent_dim": value}))
+    return specs
+
+
+def _robustness_specs() -> list[tuple[str, str, dict[str, Any]]]:
+    return [
+        ("malicious_ratio", f"malicious_ratio_{value:.1f}".replace(".", "p"), {"num_malicious": int(100 * value)})
+        for value in (0.2, 0.3, 0.4)
+    ]
+
+
+def _result_path(output_dir: Path, task: str, attack: str) -> Path:
+    return output_dir / f"{task}__{attack}__svdd.json"
+
+
+def _complete(path: Path, task: str, attack: str, rounds: int, seed: int) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        meta = payload.get("meta", {})
+        effective = meta.get("effective_config", {})
+        records = payload.get("rounds")
+        return (
+            isinstance(records, list)
+            and len(records) == rounds
+            and meta.get("task") == task
+            and meta.get("attack") == attack
+            and meta.get("defense") == "svdd"
+            and int(meta.get("total_rounds", -1)) == rounds
+            and int(effective.get("seed", -1)) == seed
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _legacy_labels(overrides: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    malicious = int(overrides.get("num_malicious", 30))
+    if malicious != 30:
+        ratio_label = f"malicious_ratio_{malicious / 100:.1f}".replace(".", "p")
+        return [ratio_label]
+    # The legacy tree has no lambda-specific folders. Its baseline/factor
+    # results are reusable only when the requested lambda is exactly 0.5.
+    if abs(float(overrides.get("svdd_lambda", 0.5)) - 0.5) > 1e-12:
+        return []
+    labels.append("malicious_ratio_0p3")
+    if "phase1_rounds" in overrides:
+        labels.append(f"phase1_{int(overrides['phase1_rounds']):03d}")
+    if "server_validation_size" in overrides:
+        labels.append(f"trust_{int(overrides['server_validation_size']):03d}")
+    if "latent_dim" in overrides:
+        labels.append(f"latent_{int(overrides['latent_dim']):03d}")
+    # The old baseline labels are also exact matches for the default config.
+    labels.extend(("phase1_015", "trust_050", "latent_064"))
+    return list(dict.fromkeys(labels))
+
+
+def _write_config(root: Path, study: str, factor: str, label: str, task: str, attack: str, seed: int, rounds: int, factor_overrides: dict[str, Any]) -> tuple[Path, Path, Path]:
+    output_dir = root / study / factor / label / task / attack / f"seed_{seed}"
+    config_path = root / "_configs" / study / factor / label / task / attack / f"seed_{seed}.json"
+    overrides = dict(BASE_OVERRIDES)
+    overrides.update(factor_overrides)
+    overrides.update({"seed": seed, "total_rounds": rounds})
+    payload = {
+        "task": task,
+        "attacks": attack,
+        "defenses": "svdd",
+        "log_dir": str(output_dir),
+        "fed_config_file": "configs/federated.json",
+        "hyperparameters_file": "configs/hyperparameters.json",
+        "fed_config_overrides": overrides,
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return config_path, output_dir, _result_path(output_dir, task, attack)
+
+
+def _parse_csv(value: str, cast: type[str] | type[int]) -> tuple[Any, ...]:
+    return tuple(cast(item.strip()) for item in value.split(",") if item.strip())
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output-root", type=Path, default=Path("log/svdd_report_matrix_absolute_mad_topk10_40_300"))
+    parser.add_argument("--legacy-root", type=Path, default=Path("log/svdd_cross_task_sensitivity_absolute_mad_topk10_40_300"))
+    parser.add_argument("--rounds", type=int, default=300)
+    parser.add_argument("--seeds", default=",".join(map(str, SEEDS)))
+    parser.add_argument("--gpus", default="0,1,2")
+    parser.add_argument("--workers-per-gpu", type=int, default=10)
+    parser.add_argument("--omp-threads", type=int, default=1)
+    parser.add_argument("--python", dest="python_bin", default=sys.executable)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--prepare-only", action="store_true")
+    args = parser.parse_args()
+
+    seeds = tuple(_parse_csv(args.seeds, int))
+    gpus = tuple(_parse_csv(args.gpus, int))
+    if not seeds or not gpus or args.rounds < 1 or args.workers_per_gpu < 1 or args.omp_threads < 1:
+        parser.error("seeds, gpus, rounds, workers-per-gpu, and omp-threads must be positive")
+
+    root = args.output_root.resolve()
+    legacy_root = args.legacy_root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    requested: list[dict[str, Any]] = []
+    for study, specs in (("parameter_sensitivity", _parameter_specs()), ("robustness", _robustness_specs())):
+        for factor, label, factor_overrides in specs:
+            for task in TASKS:
+                attacks = IMAGE_ATTACKS if task in IMAGE_TASKS else AG_NEWS_ATTACKS
+                for attack in attacks:
+                    for seed in seeds:
+                        overrides = dict(BASE_OVERRIDES)
+                        overrides.update(factor_overrides)
+                        key = (task, attack, seed, tuple(sorted(overrides.items())))
+                        config_path, output_dir, result_path = _write_config(
+                            root, study, factor, label, task, attack, seed, args.rounds, factor_overrides
+                        )
+                        requested.append({
+                            "study": study, "factor": factor, "label": label,
+                            "task": task, "attack": attack, "seed": seed,
+                            "key": key, "config_path": config_path,
+                            "output_dir": output_dir, "result_path": result_path,
+                            "status": "pending",
+                        })
+
+    canonical: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for item in requested:
+        canonical.setdefault(item["key"], item)
+    aliases: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for item in requested:
+        aliases.setdefault(item["key"], []).append(item)
+
+    jobs: list[dict[str, Any]] = []
+    legacy_reused = 0
+    complete = 0
+    for key, item in canonical.items():
+        result_path = item["result_path"]
+        if not args.force and _complete(result_path, item["task"], item["attack"], args.rounds, item["seed"]):
+            item["status"] = "complete"
+            complete += 1
+            continue
+        if not args.force:
+            overrides = dict(item["key"][3])
+            for legacy_label in _legacy_labels(overrides):
+                source = legacy_root / item["task"] / item["attack"] / legacy_label / f"seed_{item['seed']}" / f"{item['task']}__{item['attack']}__svdd.json"
+                if source.exists() and _complete(source, item["task"], item["attack"], args.rounds, item["seed"]):
+                    result_path.parent.mkdir(parents=True, exist_ok=True)
+                    if result_path.exists() or result_path.is_symlink():
+                        result_path.unlink()
+                    result_path.symlink_to(source)
+                    item["status"] = "legacy_reused"
+                    item["source_result"] = str(source)
+                    legacy_reused += 1
+                    complete += 1
+                    break
+        if item["status"] == "pending":
+            jobs.append(item)
+
+    manifest = {
+        "description": "Approved AE-SVDD sensitivity and malicious-ratio robustness matrix",
+        "rounds": args.rounds,
+        "seeds": seeds,
+        "gpus": gpus,
+        "workers_per_gpu": args.workers_per_gpu,
+        "fixed": dict(BASE_OVERRIDES),
+        "topk_reject_ratios": [0.10, 0.20, 0.30, 0.40],
+        "requested_jobs": len(requested),
+        "unique_jobs": len(canonical),
+        "legacy_reused": legacy_reused,
+        "complete_before_run": complete,
+        "pending_before_run": len(jobs),
+        "jobs": [
+            {k: str(v) if isinstance(v, Path) else v for k, v in item.items() if k not in {"key", "config_path", "output_dir", "result_path"}}
+            for item in requested
+        ],
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    print(f"requested={len(requested)} unique={len(canonical)} legacy_reused={legacy_reused} complete={complete} pending={len(jobs)}", flush=True)
+    if args.prepare_only:
+        return 0
+    if not jobs:
+        return 0
+
+    # Use one queue per GPU. First interleave datasets globally, then assign
+    # the interleaved stream round-robin. This makes the first batch on every
+    # card contain both fast and slow datasets, rather than placing all early
+    # MNIST/FashionMNIST jobs ahead of CIFAR10/AGNews.
+    gpu_queues: dict[int, queue.Queue[dict[str, Any]]] = {
+        gpu: queue.Queue() for gpu in gpus
+    }
+    jobs_by_task = {task: [] for task in TASKS}
+    for job in jobs:
+        jobs_by_task[job["task"]].append(job)
+    interleaved: list[dict[str, Any]] = []
+    for index in range(max(len(items) for items in jobs_by_task.values())):
+        for task in TASKS:
+            items = jobs_by_task[task]
+            if index < len(items):
+                interleaved.append(items[index])
+    for index, job in enumerate(interleaved):
+        gpu = gpus[index % len(gpus)]
+        job["assigned_gpu"] = gpu
+        gpu_queues[gpu].put(job)
+    print(
+        "gpu_pending=" + ",".join(
+            f"{gpu}:{gpu_queues[gpu].qsize()}" for gpu in gpus
+        ),
+        flush=True,
+    )
+    failures: list[tuple[dict[str, Any], int]] = []
+    lock = threading.Lock()
+
+    def worker(gpu: int, worker_id: int) -> None:
+        pending = gpu_queues[gpu]
+        while True:
+            try:
+                job = pending.get_nowait()
+            except queue.Empty:
+                return
+            output_dir = Path(job["output_dir"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            console_path = output_dir / "console.log"
+            env = os.environ.copy()
+            env.update({
+                "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+                "CUDA_VISIBLE_DEVICES": str(gpu),
+                "OMP_NUM_THREADS": str(args.omp_threads),
+                "MKL_NUM_THREADS": str(args.omp_threads),
+                "OPENBLAS_NUM_THREADS": str(args.omp_threads),
+                "PYTHONUNBUFFERED": "1",
+            })
+            command = [str(args.python_bin), "-u", "-m", "src.pipeline", "--config", str(job["config_path"])]
+            with lock:
+                print(f"START gpu={gpu} worker={worker_id} {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']}", flush=True)
+            with console_path.open("w", encoding="utf-8") as stream:
+                completed_process = subprocess.run(command, cwd=str(PROJECT_ROOT), env=env, stdout=stream, stderr=subprocess.STDOUT, check=False, start_new_session=True)
+            with lock:
+                if completed_process.returncode == 0:
+                    print(f"DONE {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']}", flush=True)
+                else:
+                    failures.append((job, completed_process.returncode))
+                    print(f"FAIL {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']} exit={completed_process.returncode} log={console_path}", flush=True)
+            pending.task_done()
+
+    threads = [threading.Thread(target=worker, args=(gpu, worker_id), daemon=False) for gpu in gpus for worker_id in range(args.workers_per_gpu)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    print(f"finished failures={len(failures)}", flush=True)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

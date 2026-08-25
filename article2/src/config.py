@@ -119,6 +119,7 @@ class FedConfig:
     # mean/std scaling afterwards.
     svdd_input_mode: str = "absolute"
     svdd_input_dim: int = 4096
+    svdd_normalization: str = "mean_std"
     svdd_normalization_eps: float = 1e-6
     svdd_descriptor_seed: int = 2027
     svdd_descriptor_device: str = "auto"

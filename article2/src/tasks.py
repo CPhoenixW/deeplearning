@@ -375,7 +375,13 @@ class Covid19Task(FederatedTask):
 
 
 class _TokenizedTextDataset(Dataset):
-    """Map-style text dataset with integer labels and fixed-length token ids."""
+    """Map-style AG News dataset with cached, fixed-length token ids.
+
+    Tokenizing inside ``__getitem__`` is needlessly expensive for federated
+    training because the same examples are visited once per client and once
+    per communication round.  Encode the complete split once during dataset
+    construction so training only performs a tensor lookup.
+    """
 
     def __init__(
         self,
@@ -384,31 +390,34 @@ class _TokenizedTextDataset(Dataset):
         token_to_id: Dict[str, int],
         seq_len: int,
     ) -> None:
-        self.rows = rows
-        self.tokenizer = tokenizer
-        self.token_to_id = token_to_id
         self.seq_len = int(seq_len)
         self.pad_idx = int(token_to_id["<pad>"])
         self.unk_idx = int(token_to_id["<unk>"])
-        # labels from HF AG News are already 0..3
-        self.targets = [int(label) for label, _ in rows]
+
+        # Labels from HF AG News are already 0..3.  Keep the encoded examples
+        # as one contiguous tensor so __getitem__ does no Python tokenization
+        # or per-sample tensor construction during training.
+        self.targets = torch.empty(len(rows), dtype=torch.long)
+        self.input_ids = torch.full(
+            (len(rows), self.seq_len), self.pad_idx, dtype=torch.long
+        )
+        for row_idx, (label, text) in enumerate(rows):
+            self.targets[row_idx] = int(label)
+            tokens = tokenizer(text)
+            token_ids = [
+                token_to_id.get(token, self.unk_idx)
+                for token in tokens[: self.seq_len]
+            ]
+            if token_ids:
+                self.input_ids[row_idx, : len(token_ids)] = torch.as_tensor(
+                    token_ids, dtype=torch.long
+                )
 
     def __len__(self) -> int:
-        return len(self.rows)
-
-    def _encode(self, text: str) -> torch.Tensor:
-        toks = self.tokenizer(text)
-        token_ids = [self.token_to_id.get(tok, self.unk_idx) for tok in toks]
-        token_ids = token_ids[: self.seq_len]
-        if len(token_ids) < self.seq_len:
-            token_ids = token_ids + [self.pad_idx] * (self.seq_len - len(token_ids))
-        return torch.tensor(token_ids, dtype=torch.long)
+        return int(self.input_ids.shape[0])
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        label, text = self.rows[idx]
-        x = self._encode(text)
-        y = int(label)
-        return x, y
+        return self.input_ids[idx], self.targets[idx]
 
 
 def _basic_english_tokenize(text: str) -> List[str]:

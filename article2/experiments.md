@@ -129,7 +129,7 @@ Detection is evaluated independently from global utility. The compact portrait W
 
 ## 5.2 Parameter Sensitivity
 
-Sensitivity experiments vary exactly one AE-SVDD factor at a time. Every run uses the single `GN` attack, the `svdd` defense, all five datasets, one seed (`42`), and 300 communication rounds. The fixed configuration is descriptor dimension 4096, `λ=0.5`, latent dimension 64, Phase-1 length 15, Phase-1 score `recon`, and Phase-2 score `combined`. The three one-factor sweeps therefore contain `(7 + 4 + 4) × 5 = 75` configurations; no Cartesian product and no additional baseline runs are included.
+The revised sensitivity matrix varies exactly one AE-SVDD factor at a time on MNIST and Fashion-MNIST. Every run uses the single `GN` attack, the `svdd` defense, one seed (`42`), and 300 communication rounds. The fixed configuration is descriptor dimension 4096, `λ=0.5`, latent dimension 64, Phase-1 length 15, trusted validation size 50, Phase-1 score `recon`, and Phase-2 score `combined`. The candidate rejection grid is `{10%, 20%, 30%, 40%, 50%}`; 0% rejection is not a candidate. The four one-factor sweeps therefore contain `(7 + 6 + 4 + 6) × 2 = 46` configurations; no Cartesian product and no additional baseline runs are included. The earlier 75-run, five-dataset matrix is superseded by this revised protocol.
 
 ### 5.2.1 Loss Coefficient
 
@@ -137,31 +137,31 @@ Sweep the SVDD loss ratio `λ` (config key `svdd_lambda`) in `{0.2, 0.3, 0.4, 0.
 
 类似这张图
 
-![Loss coefficient sensitivity example](assets/sensitivity-example.png)
+![Loss coefficient sensitivity](assets/svdd-sensitivity-v2-lambda.png)
 
 ### 5.2.2 Phase-1 Duration
 
-Sweep `phase1_rounds` in `{5, 15, 30, 50}` with total rounds fixed at 300. Phase 1 always uses reconstruction-error ranking, and Phase 2 always uses the combined reconstruction-error plus SVDD-distance ranking. This isolates the duration of the reconstruction warm-up while keeping `λ=0.5`.
+Sweep `phase1_rounds` in `{5, 10, 15, 30, 50, 100}` with total rounds fixed at 300. Phase 1 always uses reconstruction-error ranking, and Phase 2 always uses the combined reconstruction-error plus SVDD-distance ranking. This isolates the duration of the reconstruction warm-up while keeping `λ=0.5`.
 
 类似这种图
 
-![Phase-1 duration sensitivity example](assets/sensitivity-example.png)
+![Phase-1 duration sensitivity](assets/svdd-sensitivity-v2-phase1.png)
 
 ### 5.2.3 Trusted Validation-Set Size
 
-Vary the direct sample count `server_validation_size` in `{10, 25, 50, 100, 200}`. Every validation set is clean, stratified, and withheld from clients. The primary value is 50 direct samples. Keep the candidate rejection grid and tie rule unchanged so only validation reliability changes.
+Vary the direct sample count `server_validation_size` in `{10, 50, 100, 500}`. Every validation set is clean, stratified, and withheld from clients. The primary value is 50 direct samples. Keep the candidate rejection grid `{10%, 20%, 30%, 40%, 50%}` and tie rule unchanged so only validation reliability changes.
 
 类似这种图
 
-![Trusted validation-set sensitivity example](assets/sensitivity-example.png)
+![Trusted validation-set sensitivity](assets/svdd-sensitivity-v2-validation.png)
 
 ### 5.2.4 Latent Representation Dimension
 
-Sweep `latent_dim` in `{16, 32, 64, 128}` while keeping the input descriptor dimension and all optimization settings fixed. This evaluates the compression bottleneck without changing the client-selection rule.
+Sweep `latent_dim` in `{8, 32, 64, 256, 512, 4096}` while keeping the input descriptor dimension and all optimization settings fixed. This evaluates the compression bottleneck without changing the client-selection rule.
 
 类似这种图
 
-![Latent representation sensitivity example](assets/sensitivity-example.png)
+![Latent representation sensitivity](assets/svdd-sensitivity-v2-latent.png)
 
 ## 5.3 Robustness Analysis
 

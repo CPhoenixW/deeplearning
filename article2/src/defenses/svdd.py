@@ -41,7 +41,7 @@ class SVDDDefense(BaseDefense):
 
     defense_name = "svdd"
     # This is an internal protocol grid, not a user-facing hyperparameter.
-    TOPK_REJECT_RATIOS = (0.10, 0.20, 0.30, 0.40, 0.50)
+    TOPK_REJECT_RATIOS = (0.10, 0.20, 0.30, 0.40)
     SCORE_MODES = ("legacy", "recon", "combined", "svdd")
 
     def __init__(
@@ -76,6 +76,9 @@ class SVDDDefense(BaseDefense):
         self.input_dim = int(config.svdd_input_dim)
         if self.input_dim != 4096:
             raise ValueError("svdd_input_dim must remain 4096 for the fixed descriptor.")
+        self.normalization = str(getattr(config, "svdd_normalization", "mean_std")).lower().strip()
+        if self.normalization not in {"mean_std", "median_mad"}:
+            raise ValueError("svdd_normalization must be 'mean_std' or 'median_mad'.")
         self.normalization_eps = float(config.svdd_normalization_eps)
         if not math.isfinite(self.normalization_eps) or self.normalization_eps <= 0.0:
             raise ValueError("svdd_normalization_eps must be positive and finite.")
@@ -278,16 +281,24 @@ class SVDDDefense(BaseDefense):
         return self.descriptor.describe_many(client_state_dicts, reference)
 
     def _scale_input_matrix(self, raw: Tensor) -> Tuple[Tensor, Tensor]:
-        """Apply finite-client feature-wise mean/std normalization."""
+        """Apply finite-client feature-wise mean/std or median/MAD scaling."""
 
         finite_rows = torch.isfinite(raw).all(dim=1)
         if not bool(finite_rows.any().item()):
             raise FloatingPointError("All SVDD feature rows are non-finite.")
         safe = torch.nan_to_num(raw.float(), nan=0.0, posinf=0.0, neginf=0.0)
         valid = safe[finite_rows]
-        mean = valid.mean(dim=0)
-        std = valid.std(dim=0, unbiased=False).clamp_min(self.normalization_eps)
-        scaled = (safe - mean) / std
+        if self.normalization == "mean_std":
+            center = valid.mean(dim=0)
+            scale = valid.std(dim=0, unbiased=False)
+        else:
+            center = valid.median(dim=0).values
+            scale = (valid - center).abs().median(dim=0).values
+            # Gaussian-consistent MAD scale; the final clamp handles constant
+            # descriptor coordinates without introducing non-finite values.
+            scale = scale * 1.4826
+        scale = scale.clamp_min(self.normalization_eps)
+        scaled = (safe - center) / scale
         scaled[~finite_rows] = 0.0
         if not bool(torch.isfinite(scaled).all().item()):
             raise FloatingPointError("SVDD feature scaling produced non-finite values.")

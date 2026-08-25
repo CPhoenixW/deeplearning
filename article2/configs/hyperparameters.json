@@ -8,6 +8,7 @@
     "ae_grad_clip": 1.0,
     "svdd_input_mode": "absolute",
     "svdd_input_dim": 4096,
+    "svdd_normalization": "mean_std",
     "svdd_normalization_eps": 0.000001,
     "svdd_descriptor_seed": 2027,
     "svdd_descriptor_device": "auto",

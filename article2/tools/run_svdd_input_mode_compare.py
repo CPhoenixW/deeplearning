@@ -41,6 +41,7 @@ BASE_OVERRIDES = {
     "ae_weight_decay": 1e-6,
     "ae_grad_clip": 1.0,
     "svdd_input_dim": 4096,
+    "svdd_normalization": "mean_std",
     "svdd_normalization_eps": 1e-6,
     "svdd_descriptor_device": "cuda",
     "phase1_rounds": 15,
@@ -89,9 +90,11 @@ def _run_one(python_bin: str, script: Path, config: Path, output: Path, gpu: int
         return subprocess.run(command, cwd=str(script.parent), env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
 
 
-def _summarize(root: Path, seeds: tuple[int, ...], rounds: int) -> Path:
+def _summarize(
+    root: Path, seeds: tuple[int, ...], rounds: int, modes: tuple[str, ...]
+) -> Path:
     rows = []
-    for mode in MODES:
+    for mode in modes:
         for seed in seeds:
             _, _, result = _paths(root, mode, seed)
             if not result.exists():
@@ -119,6 +122,7 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--gpus", default="0,1,2")
     parser.add_argument("--workers-per-gpu", type=int, default=2)
+    parser.add_argument("--modes", default=','.join(MODES))
     parser.add_argument("--output-root", type=Path, default=Path("log/fashion_svdd_input_compare_bd_3gpu"))
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args()
@@ -128,10 +132,13 @@ def main() -> int:
     gpus = tuple(int(item) for item in args.gpus.split(",") if item.strip())
     if not gpus or args.workers_per_gpu < 1:
         parser.error("gpus must be non-empty and workers-per-gpu must be positive")
+    modes = tuple(item.strip().lower() for item in args.modes.split(",") if item.strip())
+    if not modes or any(mode not in MODES for mode in modes):
+        parser.error(f"modes must be a subset of {MODES}")
 
     root = args.output_root.resolve()
     script = (Path(__file__).resolve().parents[1] / "svdd_test.py").resolve()
-    jobs = [_write_config(root, mode, seed, args.rounds) for mode in MODES for seed in seeds]
+    jobs = [_write_config(root, mode, seed, args.rounds) for mode in modes for seed in seeds]
     worker_count = len(gpus) * args.workers_per_gpu
     assigned = [
         (config, output, gpu)
@@ -144,8 +151,8 @@ def main() -> int:
             for config, output, gpu in assigned
         ]
         codes = [future.result() for future in futures]
-    summary = _summarize(root, seeds, args.rounds)
-    print(f"summary={summary} workers={worker_count} gpus={gpus}")
+    summary = _summarize(root, seeds, args.rounds, modes)
+    print(f"summary={summary} modes={modes} workers={worker_count} gpus={gpus}")
     return 1 if any(codes) else 0
 
 
