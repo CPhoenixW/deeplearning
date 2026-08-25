@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -17,9 +18,18 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TASKS = ("mnist", "fashion_mnist", "cifar10", "ag_news")
 IMAGE_TASKS = {"mnist", "fashion_mnist", "cifar10"}
-IMAGE_ATTACKS = ("gn", "sf", "lf", "bd", "lie")
-AG_NEWS_ATTACKS = ("gn", "sf", "lf", "lie")
+IMAGE_ATTACKS = ("gn", "sf", "lf", "bd")
+AG_NEWS_ATTACKS = ("gn", "sf", "lf")
 SEEDS = (42, 43, 44)
+
+# Conservative peak-memory estimates for the current 24-GB GPUs.  These are
+# admission-control estimates, not changes to the experiment itself.
+TASK_MEMORY_GB = {
+    "mnist": 1.0,
+    "fashion_mnist": 1.5,
+    "cifar10": 5.5,
+    "ag_news": 8.0,
+}
 
 BASE_OVERRIDES: dict[str, Any] = {
     "num_clients": 100,
@@ -153,19 +163,31 @@ def main() -> int:
     parser.add_argument("--seeds", default=",".join(map(str, SEEDS)))
     parser.add_argument("--gpus", default="0,1,2")
     parser.add_argument("--workers-per-gpu", type=int, default=10)
+    parser.add_argument("--gpu-memory-budget-gb", type=float, default=20.0)
     parser.add_argument("--omp-threads", type=int, default=1)
     parser.add_argument("--python", dest="python_bin", default=sys.executable)
+    parser.add_argument("--resume-root", type=Path, default=None)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
 
     seeds = tuple(_parse_csv(args.seeds, int))
     gpus = tuple(_parse_csv(args.gpus, int))
-    if not seeds or not gpus or args.rounds < 1 or args.workers_per_gpu < 1 or args.omp_threads < 1:
+    if (
+        not seeds
+        or not gpus
+        or args.rounds < 1
+        or args.workers_per_gpu < 1
+        or args.gpu_memory_budget_gb <= 0.0
+        or args.omp_threads < 1
+    ):
         parser.error("seeds, gpus, rounds, workers-per-gpu, and omp-threads must be positive")
 
     root = args.output_root.resolve()
     legacy_root = args.legacy_root.resolve()
+    resume_root = args.resume_root.resolve() if args.resume_root is not None else None
+    if resume_root is not None and not resume_root.is_dir():
+        parser.error(f"resume-root does not exist: {resume_root}")
     root.mkdir(parents=True, exist_ok=True)
     requested: list[dict[str, Any]] = []
     for study, specs in (("parameter_sensitivity", _parameter_specs()), ("robustness", _robustness_specs())):
@@ -197,6 +219,7 @@ def main() -> int:
 
     jobs: list[dict[str, Any]] = []
     legacy_reused = 0
+    resumed = 0
     complete = 0
     for key, item in canonical.items():
         result_path = item["result_path"]
@@ -204,6 +227,17 @@ def main() -> int:
             item["status"] = "complete"
             complete += 1
             continue
+        if not args.force and resume_root is not None:
+            relative = result_path.relative_to(root)
+            source = resume_root / relative
+            if source.exists() and _complete(source, item["task"], item["attack"], args.rounds, item["seed"]):
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, result_path)
+                item["status"] = "resumed"
+                item["source_result"] = str(source)
+                resumed += 1
+                complete += 1
+                continue
         if not args.force:
             overrides = dict(item["key"][3])
             for legacy_label in _legacy_labels(overrides):
@@ -227,11 +261,13 @@ def main() -> int:
         "seeds": seeds,
         "gpus": gpus,
         "workers_per_gpu": args.workers_per_gpu,
+        "gpu_memory_budget_gb": args.gpu_memory_budget_gb,
         "fixed": dict(BASE_OVERRIDES),
         "topk_reject_ratios": [0.10, 0.20, 0.30, 0.40],
         "requested_jobs": len(requested),
         "unique_jobs": len(canonical),
         "legacy_reused": legacy_reused,
+        "resumed": resumed,
         "complete_before_run": complete,
         "pending_before_run": len(jobs),
         "jobs": [
@@ -240,7 +276,7 @@ def main() -> int:
         ],
     }
     (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
-    print(f"requested={len(requested)} unique={len(canonical)} legacy_reused={legacy_reused} complete={complete} pending={len(jobs)}", flush=True)
+    print(f"requested={len(requested)} unique={len(canonical)} legacy_reused={legacy_reused} resumed={resumed} complete={complete} pending={len(jobs)}", flush=True)
     if args.prepare_only:
         return 0
     if not jobs:
@@ -274,6 +310,21 @@ def main() -> int:
     )
     failures: list[tuple[dict[str, Any], int]] = []
     lock = threading.Lock()
+    gpu_conditions = {gpu: threading.Condition() for gpu in gpus}
+    gpu_reserved_gb = {gpu: 0.0 for gpu in gpus}
+
+    def reserve_gpu_memory(gpu: int, amount_gb: float) -> None:
+        condition = gpu_conditions[gpu]
+        with condition:
+            while gpu_reserved_gb[gpu] + amount_gb > args.gpu_memory_budget_gb:
+                condition.wait()
+            gpu_reserved_gb[gpu] += amount_gb
+
+    def release_gpu_memory(gpu: int, amount_gb: float) -> None:
+        condition = gpu_conditions[gpu]
+        with condition:
+            gpu_reserved_gb[gpu] = max(0.0, gpu_reserved_gb[gpu] - amount_gb)
+            condition.notify_all()
 
     def worker(gpu: int, worker_id: int) -> None:
         pending = gpu_queues[gpu]
@@ -285,6 +336,8 @@ def main() -> int:
             output_dir = Path(job["output_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
             console_path = output_dir / "console.log"
+            memory_estimate_gb = float(TASK_MEMORY_GB[job["task"]])
+            reserve_gpu_memory(gpu, memory_estimate_gb)
             env = os.environ.copy()
             env.update({
                 "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
@@ -295,17 +348,20 @@ def main() -> int:
                 "PYTHONUNBUFFERED": "1",
             })
             command = [str(args.python_bin), "-u", "-m", "src.pipeline", "--config", str(job["config_path"])]
-            with lock:
-                print(f"START gpu={gpu} worker={worker_id} {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']}", flush=True)
-            with console_path.open("w", encoding="utf-8") as stream:
-                completed_process = subprocess.run(command, cwd=str(PROJECT_ROOT), env=env, stdout=stream, stderr=subprocess.STDOUT, check=False, start_new_session=True)
-            with lock:
-                if completed_process.returncode == 0:
-                    print(f"DONE {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']}", flush=True)
-                else:
-                    failures.append((job, completed_process.returncode))
-                    print(f"FAIL {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']} exit={completed_process.returncode} log={console_path}", flush=True)
-            pending.task_done()
+            try:
+                with lock:
+                    print(f"START gpu={gpu} worker={worker_id} mem={memory_estimate_gb:.1f}GB {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']}", flush=True)
+                with console_path.open("w", encoding="utf-8") as stream:
+                    completed_process = subprocess.run(command, cwd=str(PROJECT_ROOT), env=env, stdout=stream, stderr=subprocess.STDOUT, check=False, start_new_session=True)
+                with lock:
+                    if completed_process.returncode == 0:
+                        print(f"DONE {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']}", flush=True)
+                    else:
+                        failures.append((job, completed_process.returncode))
+                        print(f"FAIL {job['study']} {job['factor']}={job['label']} {job['task']}/{job['attack']}/seed_{job['seed']} exit={completed_process.returncode} log={console_path}", flush=True)
+            finally:
+                release_gpu_memory(gpu, memory_estimate_gb)
+                pending.task_done()
 
     threads = [threading.Thread(target=worker, args=(gpu, worker_id), daemon=False) for gpu in gpus for worker_id in range(args.workers_per_gpu)]
     for thread in threads:
