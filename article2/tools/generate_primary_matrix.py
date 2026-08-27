@@ -41,12 +41,8 @@ BASE_OVERRIDES: dict[str, Any] = {
     "num_workers": 0,
     "dirichlet_alpha": 1.0,
     "phase1_rounds": 15,
-    "phase1_score_mode": "recon",
-    "phase2_score_mode": "combined",
     "svdd_lambda": 0.5,
     "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
-    "svdd_input_mode": "absolute",
-    "svdd_input_dim": 4096,
     "svdd_normalization_eps": 1e-6,
     "device": "cuda",
 }
@@ -106,7 +102,7 @@ def write_matrix(root: Path, *, rounds: int = 300, force: bool = False) -> list[
             )
         jobs.append(MatrixJob(task, attack, defense, seed, str(config_path), str(log_dir)))
     manifest = {
-        "protocol": "article2-primary-v2-combined-phase2",
+        "protocol": "article2-primary-v3-fixed-absolute",
         "rounds": int(rounds),
         "tasks": list(IMAGE_TASKS + ("ag_news",)),
         "image_attacks": list(IMAGE_ATTACKS),

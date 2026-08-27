@@ -40,9 +40,8 @@ class SVDDDefense(BaseDefense):
     """Two-phase AE-SVDD defense server."""
 
     defense_name = "svdd"
-    # This is an internal protocol grid, not a user-facing hyperparameter.
-    TOPK_REJECT_RATIOS = (0.10, 0.20, 0.30, 0.40)
-    SCORE_MODES = ("legacy", "recon", "combined", "svdd")
+    INPUT_DIM = 4096
+    TOPK_REJECT_RATIOS = (0.10, 0.20, 0.30, 0.40, 0.50)
 
     def __init__(
         self,
@@ -55,30 +54,16 @@ class SVDDDefense(BaseDefense):
         super().__init__(config, d_bn, device, model_fn, validation_loader)
         if not math.isfinite(float(config.svdd_lambda)) or not 0.0 <= float(config.svdd_lambda) <= 1.0:
             raise ValueError("svdd_lambda must be finite and in [0, 1].")
-        legacy_mode = str(getattr(config, "svdd_score_mode", "legacy") or "legacy").lower().strip()
-        phase1_mode = getattr(config, "phase1_score_mode", None)
-        phase2_mode = getattr(config, "phase2_score_mode", None)
-        if phase1_mode is None and phase2_mode is None:
-            if legacy_mode == "legacy":
-                phase1_mode, phase2_mode = "recon", "svdd"
-            else:
-                # Preserve old sensitivity configs that intentionally applied
-                # one score mode to both phases.
-                phase1_mode, phase2_mode = legacy_mode, legacy_mode
-        else:
-            phase1_mode = phase1_mode or "recon"
-            phase2_mode = phase2_mode or ("svdd" if legacy_mode == "legacy" else legacy_mode)
-        self.phase1_score_mode = self._normalize_score_mode(phase1_mode, "phase1_score_mode")
-        self.phase2_score_mode = self._normalize_score_mode(phase2_mode, "phase2_score_mode")
-        self.input_mode = str(config.svdd_input_mode).lower().strip()
-        if self.input_mode not in {"absolute", "delta"}:
-            raise ValueError("svdd_input_mode must be 'absolute' or 'delta'.")
-        self.input_dim = int(config.svdd_input_dim)
-        if self.input_dim != 4096:
-            raise ValueError("svdd_input_dim must remain 4096 for the fixed descriptor.")
-        self.normalization = str(getattr(config, "svdd_normalization", "mean_std")).lower().strip()
-        if self.normalization not in {"mean_std", "median_mad"}:
-            raise ValueError("svdd_normalization must be 'mean_std' or 'median_mad'.")
+        self.phase1_score_mode = "recon"
+        self.phase2_score_mode = "combined"
+        self.validation_tie_break = str(
+            getattr(config, "svdd_validation_tie_break", "largest") or "largest"
+        ).lower().strip()
+        if self.validation_tie_break not in {"largest", "smallest", "median"}:
+            raise ValueError(
+                "svdd_validation_tie_break must be one of ('largest', 'smallest', 'median')."
+            )
+        self.input_mode = "absolute"
         self.normalization_eps = float(config.svdd_normalization_eps)
         if not math.isfinite(self.normalization_eps) or self.normalization_eps <= 0.0:
             raise ValueError("svdd_normalization_eps must be positive and finite.")
@@ -96,7 +81,7 @@ class SVDDDefense(BaseDefense):
         self.descriptor = FixedHierarchicalMultiViewDescriptor(
             reference,
             parameter_names=self.param_names,
-            output_dim=self.input_dim,
+            output_dim=self.INPUT_DIM,
             seed=int(getattr(config, "svdd_descriptor_seed", 2027)),
             projection_device=projection_device,
             global_ratio=float(getattr(config, "svdd_descriptor_global_ratio", 0.5)),
@@ -116,17 +101,6 @@ class SVDDDefense(BaseDefense):
         self.optimizer_ae = torch.optim.Adam(
             self.ae.parameters(), lr=config.ae_lr, weight_decay=config.ae_weight_decay
         )
-
-    @classmethod
-    def _normalize_score_mode(cls, value: object, field_name: str) -> str:
-        mode = str(value).lower().strip()
-        if mode == "legacy":
-            raise ValueError(f"{field_name} must resolve to recon, combined, or svdd.")
-        if mode not in cls.SCORE_MODES:
-            raise ValueError(
-                f"{field_name} must be one of {tuple(item for item in cls.SCORE_MODES if item != 'legacy')}, got {mode!r}."
-            )
-        return mode
 
     @staticmethod
     def _reconstruction_loss(prediction: Tensor, target: Tensor) -> Tensor:
@@ -154,38 +128,6 @@ class SVDDDefense(BaseDefense):
                 order.numel(), device=values.device, dtype=values.dtype
             ) / float(order.numel() - 1)
         return result
-
-    def _selection_score(
-        self,
-        reconstruction: Tensor,
-        svdd: Tensor,
-        *,
-        phase: str,
-    ) -> Tensor:
-        """Build the phase-specific score used by validation Top-K selection."""
-
-        mode = self.phase1_score_mode if phase == "phase1" else self.phase2_score_mode
-        if mode == "recon":
-            score = reconstruction
-        elif mode == "svdd":
-            score = svdd
-        else:  # combined
-            recon_rank = self._rank_score(reconstruction)
-            svdd_rank = self._rank_score(svdd)
-            score = 0.5 * (recon_rank + svdd_rank)
-        valid = torch.isfinite(reconstruction) & torch.isfinite(svdd)
-        return torch.where(valid, score, torch.full_like(score, float("inf")))
-
-    def _phase1_svdd_proxy(self, embeddings: Tensor, finite_rows: Tensor) -> Tensor:
-        """Use the current embedding median as a provisional SVDD center."""
-
-        proxy = torch.full(
-            (embeddings.shape[0],), float("inf"), device=embeddings.device
-        )
-        if bool(finite_rows.any().item()):
-            center = embeddings[finite_rows].median(dim=0).values
-            proxy[finite_rows] = ((embeddings[finite_rows] - center) ** 2).sum(dim=1)
-        return proxy
 
     def _validation_accuracy(self) -> float:
         if self.validation_loader is None:
@@ -226,10 +168,8 @@ class SVDDDefense(BaseDefense):
             self.global_model.load_state_dict(selected_state)
             return mask.float(), weights, reject_ratio, float("nan"), {}
         candidate_accuracies: Dict[str, float] = {}
-        best_mask: Tensor | None = None
-        best_weights: Tensor | None = None
-        best_ratio = self.TOPK_REJECT_RATIOS[0]
         best_accuracy = float("-inf")
+        candidates_by_ratio: dict[float, tuple[Tensor, Tensor]] = {}
         for reject_ratio in self.TOPK_REJECT_RATIOS:
             mask, weights = self._topk_candidate(
                 finite_order, reject_ratio, len(client_state_dicts)
@@ -242,13 +182,30 @@ class SVDDDefense(BaseDefense):
             self.global_model.load_state_dict(candidate_state)
             accuracy = self._validation_accuracy()
             candidate_accuracies[f"{reject_ratio:.2f}"] = accuracy
-            # Iterate from low to high so an equal-score update replaces the
-            # previous candidate and ties choose the largest rejection ratio.
-            if accuracy >= best_accuracy:
+            candidates_by_ratio[reject_ratio] = (mask, weights)
+            if accuracy > best_accuracy:
                 best_accuracy = accuracy
-                best_ratio = reject_ratio
-                best_mask = mask
-                best_weights = weights
+        tied_ratios = [
+            ratio
+            for ratio in self.TOPK_REJECT_RATIOS
+            if candidate_accuracies[f"{ratio:.2f}"] == best_accuracy
+        ]
+        if self.validation_tie_break == "median" and len(tied_ratios) > 1:
+            ordered = sorted(tied_ratios)
+            midpoint = len(ordered) // 2
+            if len(ordered) % 2:
+                best_ratio = ordered[midpoint]
+            else:
+                best_ratio = 0.5 * (ordered[midpoint - 1] + ordered[midpoint])
+            best_mask, best_weights = self._topk_candidate(
+                finite_order, best_ratio, len(client_state_dicts)
+            )
+        else:
+            if self.validation_tie_break == "smallest":
+                best_ratio = min(tied_ratios)
+            else:
+                best_ratio = max(tied_ratios)
+            best_mask, best_weights = candidates_by_ratio[best_ratio]
         if best_mask is None or best_weights is None:
             raise RuntimeError("Top-K validation selection produced no candidate.")
         selected_state = weighted_fedavg(
@@ -271,32 +228,23 @@ class SVDDDefense(BaseDefense):
     def _build_input_matrix(
         self, client_state_dicts: List[Dict[str, Tensor]]
     ) -> Tensor:
-        """Map full client weights or updates into the fixed 4096-D descriptor."""
+        """Map absolute client weights into the fixed descriptor."""
 
-        reference = (
-            self.state_dict_for_clients()
-            if self.input_mode == "delta"
-            else self._zero_reference
-        )
-        return self.descriptor.describe_many(client_state_dicts, reference)
+        return self.descriptor.describe_many(client_state_dicts, self._zero_reference)
 
     def _scale_input_matrix(self, raw: Tensor) -> Tuple[Tensor, Tensor]:
-        """Apply finite-client feature-wise mean/std or median/MAD scaling."""
+        """Apply finite-client feature-wise median/MAD scaling."""
 
         finite_rows = torch.isfinite(raw).all(dim=1)
         if not bool(finite_rows.any().item()):
             raise FloatingPointError("All SVDD feature rows are non-finite.")
         safe = torch.nan_to_num(raw.float(), nan=0.0, posinf=0.0, neginf=0.0)
         valid = safe[finite_rows]
-        if self.normalization == "mean_std":
-            center = valid.mean(dim=0)
-            scale = valid.std(dim=0, unbiased=False)
-        else:
-            center = valid.median(dim=0).values
-            scale = (valid - center).abs().median(dim=0).values
-            # Gaussian-consistent MAD scale; the final clamp handles constant
-            # descriptor coordinates without introducing non-finite values.
-            scale = scale * 1.4826
+        center = valid.median(dim=0).values
+        scale = (valid - center).abs().median(dim=0).values
+        # Gaussian-consistent MAD scale; the final clamp handles constant
+        # descriptor coordinates without introducing non-finite values.
+        scale = scale * 1.4826
         scale = scale.clamp_min(self.normalization_eps)
         scaled = (safe - center) / scale
         scaled[~finite_rows] = 0.0
@@ -346,50 +294,66 @@ class SVDDDefense(BaseDefense):
         self.optimizer_ae.zero_grad(set_to_none=True)
         return False
 
-    def phase1_step(self, client_state_dicts: List[Dict[str, Tensor]]) -> tuple:
+    def phase1_step(
+        self,
+        client_state_dicts: List[Dict[str, Tensor]],
+        *,
+        initialize_center: bool = False,
+    ) -> tuple:
+        """Run one warm-up round: detect first, then update AE.
+
+        Phase 1 deliberately uses only reconstruction error for detection.  The
+        AE is evaluated before the optimizer step, so the same-round client
+        decision cannot be affected by the update it is about to receive.
+        """
 
         raw_X = self._build_input_matrix(client_state_dicts)  # (K, D_feat)
         X, finite_rows = self._scale_input_matrix(raw_X)
-        finite_indices = torch.where(finite_rows)[0]
-        X_train = X[finite_indices].to(self.device)
+        finite_rows_device = finite_rows.to(self.device)
+        X_device = X.to(self.device)
 
-        self.ae.train()
-        x_hat = self.ae(X_train)
-        per_sample_loss = self._reconstruction_loss(x_hat, X_train)
-        loss = per_sample_loss.mean()
-
-        self._safe_ae_step(loss, self.config.ae_grad_clip)
-
+        # Detect with the AE state from the beginning of this round.  No SVDD
+        # distance or center is needed in Phase 1.
         self.ae.eval()
         with torch.no_grad():
-            X_device = X.to(self.device)
             per_client_loss = self._reconstruction_loss(
                 self.ae(X_device), X_device
             )
             per_client_loss = torch.where(
-                finite_rows.to(self.device),
+                finite_rows_device,
                 per_client_loss,
                 torch.full_like(per_client_loss, float("inf")),
             )
-            embeddings = self.ae.encode(X_device)
-            svdd_proxy = self._phase1_svdd_proxy(
-                embeddings, finite_rows.to(self.device)
-            )
-            selection_scores = self._selection_score(
-                per_client_loss,
-                svdd_proxy,
-                phase="phase1",
-            )
+            selection_scores = per_client_loss
+
         keep_mask, weights, selected_ratio, validation_accuracy, candidates = (
             self._select_topk_by_validation(
                 selection_scores.detach().cpu(), client_state_dicts
             )
         )
 
+        # Update the encoder and decoder only after client selection, and only
+        # with the selected finite clients.
+        trusted = keep_mask.to(self.device, dtype=torch.bool) & finite_rows_device
+        if not bool(trusted.any().item()):
+            raise FloatingPointError("No trusted finite clients are available for AE update.")
+        self.ae.train()
+        x_trusted = X_device[trusted]
+        per_sample_loss = self._reconstruction_loss(self.ae(x_trusted), x_trusted)
+        loss = per_sample_loss.mean()
+        self._safe_ae_step(loss, self.config.ae_grad_clip)
+
+        # The last Phase-1 round initializes c after the AE update.  Therefore
+        # c and the AE used in the first Phase-2 round share the same latent
+        # space, and Phase 2 can consume c without recalculating a new mask.
+        self.ae.eval()
         with torch.no_grad():
-            self.ae.eval()
+            embeddings = self.ae.encode(X_device)
+            if initialize_center:
+                self._set_center_from_trusted_embeddings(embeddings, trusted)
             Z = embeddings
-            z_var = Z.var().item()
+            finite_z = Z[torch.isfinite(Z).all(dim=1)]
+            z_var = finite_z.var().item() if finite_z.numel() > 1 else 0.0
             center_norm = 0.0 if self.c is None else float(self.c.norm().item())
 
         return (
@@ -403,42 +367,31 @@ class SVDDDefense(BaseDefense):
             float(validation_accuracy),
             candidates,
         )
-    
-    def init_center(self, client_state_dicts: List[Dict[str, Tensor]]) -> Tuple[float, float]:
 
-        raw_X = self._build_input_matrix(client_state_dicts)
-        X, finite_rows = self._scale_input_matrix(raw_X)
-        X = X.to(self.device)
-        finite_rows = finite_rows.to(self.device)
-        self.ae.eval()
+    def _set_center_from_trusted_embeddings(
+        self,
+        embeddings: Tensor,
+        trusted_mask: Tensor,
+    ) -> Tuple[float, float]:
+        """Initialize c from an already selected trusted client set."""
+
+        trusted = trusted_mask.to(self.device, dtype=torch.bool)
+        finite = torch.isfinite(embeddings).all(dim=1)
+        trusted = trusted & finite
+        if not bool(trusted.any().item()):
+            raise FloatingPointError(
+                "No trusted finite clients are available to initialize SVDD center."
+            )
         with torch.no_grad():
-            Z = self.ae.encode(X)
-            x_hat = self.ae(X)
-            recon_error = (x_hat - X).abs().sum(dim=1)
-            finite_recon = finite_rows & torch.isfinite(recon_error)
-            if not bool(finite_recon.any().item()):
-                raise FloatingPointError("No finite clients are available to initialize SVDD center.")
-            svdd_proxy = self._phase1_svdd_proxy(Z, finite_recon)
-            selection_scores = self._selection_score(
-                recon_error,
-                svdd_proxy,
-                phase="phase1",
-            )
-            finite_indices = torch.where(finite_recon)[0]
-            selected = _lower_quantile_mask(
-                selection_scores[finite_recon],
-                self.config.center_init_quantile,
-                parameter_name="center_init_quantile",
-            )
-            c = Z[finite_indices[selected]].mean(dim=0)
+            c = embeddings[trusted].mean(dim=0)
             if not bool(torch.isfinite(c).all().item()):
                 raise FloatingPointError("SVDD center initialization produced non-finite values.")
+            c = c.detach().clone()
             c[c.abs() < 0.01] = 0.01
-
-        self.c = c.detach()
-        center_norm = float(self.c.norm().item())
-        z_var = float(Z.var().item())
-        return center_norm, z_var
+            self.c = c
+            finite_z = embeddings[finite]
+            z_var = finite_z.var().item() if finite_z.numel() > 1 else 0.0
+        return float(self.c.norm().item()), float(z_var)
 
     def phase2_step(self, client_state_dicts: List[Dict[str, Tensor]]) -> tuple:
 
@@ -470,10 +423,14 @@ class SVDDDefense(BaseDefense):
             d,
             torch.full_like(d, float("inf")),
         )
-        selection_scores = self._selection_score(
-            recon_per_client.to(self.device),
-            d,
-            phase="phase2",
+        recon_rank = self._rank_score(recon_per_client.to(self.device))
+        svdd_rank = self._rank_score(d)
+        selection_scores = 0.5 * (recon_rank + svdd_rank)
+        valid_scores = torch.isfinite(recon_per_client.to(self.device)) & torch.isfinite(d)
+        selection_scores = torch.where(
+            valid_scores,
+            selection_scores,
+            torch.full_like(selection_scores, float("inf")),
         )
         accepted_mask, aggregation_weights, selected_ratio, validation_accuracy, candidates = (
             self._select_topk_by_validation(
@@ -505,10 +462,14 @@ class SVDDDefense(BaseDefense):
         for p_ in self.ae.decoder.parameters():
             p_.requires_grad = True
 
-        finite_rows = finite_feature_rows & torch.isfinite(X).all(dim=1)
-        if not bool(finite_rows.any().item()):
-            raise FloatingPointError("All SVDD feature rows are non-finite.")
-        X_cur = X[finite_rows].to(self.device)
+        # The reconstruction branch is also restricted to the clients that
+        # passed the current-round detection.  The optional quantile is applied
+        # only inside that trusted subset, so rejected clients never contribute
+        # to the encoder/decoder update.
+        trusted_feature_rows = trusted_cpu & finite_feature_rows
+        if not bool(trusted_feature_rows.any().item()):
+            raise FloatingPointError("No trusted finite clients are available for AE update.")
+        X_cur = X[trusted_feature_rows].to(self.device)
         X_cur_hat = self.ae(X_cur)
         recon_per_sample = self._reconstruction_loss(X_cur_hat, X_cur)
         keep = _lower_quantile_mask(
@@ -599,9 +560,16 @@ class SVDDDefense(BaseDefense):
             participant_metrics=participant_metrics,
         )
 
-    def _phase1_result(self, client_state_dicts: List[Dict[str, Tensor]]) -> RoundStats:
+    def _phase1_result(
+        self,
+        round_idx: int,
+        client_state_dicts: List[Dict[str, Tensor]],
+    ) -> RoundStats:
         center, variance, loss, scores, recon, accepted, ratio, accuracy, candidates = (
-            self.phase1_step(client_state_dicts)
+            self.phase1_step(
+                client_state_dicts,
+                initialize_center=round_idx == int(self.config.phase1_rounds),
+            )
         )
         weights = accepted / accepted.sum().clamp_min(1.0)
         return self._make_result(
@@ -613,8 +581,6 @@ class SVDDDefense(BaseDefense):
         )
 
     def _phase2_result(self, client_state_dicts: List[Dict[str, Tensor]]) -> RoundStats:
-        if self.c is None:
-            self.init_center(client_state_dicts)
         (
             center, variance, svdd_loss, recon_loss, svdd_scores, scores,
             accepted, weights, recon, ratio, accuracy, candidates,
@@ -638,7 +604,7 @@ class SVDDDefense(BaseDefense):
         client_state_dicts: List[Dict[str, Tensor]],
     ) -> RoundStats:
         if round_idx <= int(self.config.phase1_rounds):
-            return self._phase1_result(client_state_dicts)
+            return self._phase1_result(round_idx, client_state_dicts)
         return self._phase2_result(client_state_dicts)
 
 

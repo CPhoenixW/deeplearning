@@ -185,6 +185,10 @@ class FedConfig:
     # resolve historical configs; formal experiments set Phase 2 explicitly.
     phase1_score_mode: str | None = None
     phase2_score_mode: str | None = None
+    # Tie-break rule when validation-driven Top-K candidates have the same
+    # best validation accuracy. ``largest`` preserves the historical rule;
+    # ``median`` uses the numeric median of the tied rejection ratios.
+    svdd_validation_tie_break: str = "largest"
     # Deprecated compatibility field.  ``legacy`` means reconstruction in
     # Phase 1 and SVDD distance in Phase 2.  A non-legacy value preserves old
     # sensitivity runs that applied one mode to both phases.

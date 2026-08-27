@@ -56,8 +56,6 @@ C002_OVERRIDES: dict[str, Any] = {
     "ae_lr": 0.001,
     "ae_weight_decay": 1e-6,
     "ae_grad_clip": 1.0,
-    "svdd_input_mode": "delta",
-    "svdd_input_dim": 4096,
     "svdd_normalization_eps": 1e-6,
     "phase1_rounds": 15,
     "center_ema_decay": 0.9,

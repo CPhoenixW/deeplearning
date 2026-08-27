@@ -51,11 +51,7 @@ def _overrides(rounds: int) -> dict[str, Any]:
         "dirichlet_alpha": 1.0,
         "hf_datasets_offline": True,
         "phase1_rounds": 3,
-        "phase1_score_mode": "recon",
-        "phase2_score_mode": "combined",
         "svdd_lambda": 0.5,
-        "svdd_input_mode": "absolute",
-        "svdd_input_dim": 4096,
         "svdd_normalization_eps": 1e-6,
         "device": "cuda",
     }

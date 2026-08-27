@@ -140,10 +140,8 @@ def test_minimum_rejection_can_win_validation_selection() -> None:
     assert selected_ratio == 0.1
 
 
-def test_phase_scores_are_independent_from_svdd_lambda() -> None:
+def test_phase_scores_are_fixed() -> None:
     config = FedConfig(
-        phase1_score_mode="recon",
-        phase2_score_mode="combined",
         svdd_lambda=0.5,
         num_clients=5,
         num_benign=5,
@@ -173,3 +171,60 @@ def test_configured_latent_dimension_is_preserved() -> None:
         model_fn=_TinyModel,
     )
     assert server.ae.encoder.net[-1].out_features == 512
+
+
+def test_phase1_detects_before_ae_update_and_initializes_center_after_last_round() -> None:
+    """The final warm-up round must seed c from its post-update trusted AE."""
+
+    config = FedConfig(
+        num_clients=3,
+        num_benign=2,
+        phase1_rounds=1,
+        latent_dim=4,
+        device="cpu",
+    )
+    server = SVDDDefense(
+        config,
+        d_bn=4096,
+        device=torch.device("cpu"),
+        model_fn=_TinyModel,
+    )
+    reference = server.state_dict_for_clients()
+    clients = []
+    for index in range(config.num_clients):
+        state = copy.deepcopy(reference)
+        for name, value in state.items():
+            if value.is_floating_point():
+                state[name] = value + 0.02 * (index + 1)
+        clients.append(state)
+
+    ae_before_selection = {
+        name: value.detach().clone() for name, value in server.ae.state_dict().items()
+    }
+    observed = {}
+
+    def select_first_trusted(scores, client_state_dicts):
+        observed["scores"] = scores.detach().clone()
+        observed["ae_state"] = {
+            name: value.detach().clone() for name, value in server.ae.state_dict().items()
+        }
+        accepted = torch.tensor([1.0, 0.0, 0.0])
+        return accepted, accepted, 0.5, float("nan"), {}
+
+    server._select_topk_by_validation = select_first_trusted  # type: ignore[method-assign]
+    result = server.aggregate(DefenseContext(1, reference, clients))
+
+    assert result.phase == "warmup"
+    assert torch.isfinite(observed["scores"]).all()
+    for name, value in ae_before_selection.items():
+        assert torch.equal(value, observed["ae_state"][name])
+    assert server.c is not None
+
+    # c is initialized from client 0 after the trusted-only AE optimizer step.
+    raw_X = server._build_input_matrix(clients)
+    X, _ = server._scale_input_matrix(raw_X)
+    with torch.no_grad():
+        expected = server.ae.encode(X[:1].to(server.device)).squeeze(0)
+        expected = expected.detach().clone()
+        expected[expected.abs() < 0.01] = 0.01
+    assert torch.allclose(server.c, expected)

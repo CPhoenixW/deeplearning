@@ -49,14 +49,9 @@ BASE_OVERRIDES: dict[str, Any] = {
     "round_diagnostics": False,
     "dirichlet_alpha": 1.0,
     "hf_datasets_offline": True,
-    "svdd_input_mode": "absolute",
-    "svdd_input_dim": 4096,
-    "svdd_normalization": "median_mad",
     "svdd_normalization_eps": 1e-6,
     "svdd_descriptor_device": "cuda",
     "phase1_rounds": 15,
-    "phase1_score_mode": "recon",
-    "phase2_score_mode": "combined",
     "svdd_lambda": 0.5,
     "center_ema_decay": 0.9,
     "svdd_grad_clip": 1.0,
@@ -72,7 +67,7 @@ def _parameter_specs() -> list[tuple[str, str, dict[str, Any]]]:
         specs.append(("lambda", f"lambda_{value:.1f}".replace(".", "p"), {"svdd_lambda": value}))
     for value in (5, 15, 30, 50, 100):
         specs.append(("phase1", f"phase1_{value:03d}", {"phase1_rounds": value}))
-    for value in (10, 25, 50, 100, 200):
+    for value in (10, 50, 100, 200, 500, 1000):
         specs.append(("trust", f"trust_{value:03d}", {"server_validation_size": value}))
     for value in (16, 32, 64, 128):
         specs.append(("latent", f"latent_{value:03d}", {"latent_dim": value}))
@@ -131,12 +126,27 @@ def _legacy_labels(overrides: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(labels))
 
 
-def _write_config(root: Path, study: str, factor: str, label: str, task: str, attack: str, seed: int, rounds: int, factor_overrides: dict[str, Any]) -> tuple[Path, Path, Path]:
+def _write_config(
+    root: Path,
+    study: str,
+    factor: str,
+    label: str,
+    task: str,
+    attack: str,
+    seed: int,
+    rounds: int,
+    factor_overrides: dict[str, Any],
+    validation_tie_break: str = "largest",
+) -> tuple[Path, Path, Path]:
     output_dir = root / study / factor / label / task / attack / f"seed_{seed}"
     config_path = root / "_configs" / study / factor / label / task / attack / f"seed_{seed}.json"
     overrides = dict(BASE_OVERRIDES)
     overrides.update(factor_overrides)
-    overrides.update({"seed": seed, "total_rounds": rounds})
+    overrides.update({
+        "seed": seed,
+        "total_rounds": rounds,
+        "svdd_validation_tie_break": validation_tie_break,
+    })
     payload = {
         "task": task,
         "attacks": attack,
@@ -167,9 +177,46 @@ def main() -> int:
     parser.add_argument("--omp-threads", type=int, default=1)
     parser.add_argument("--python", dest="python_bin", default=sys.executable)
     parser.add_argument("--resume-root", type=Path, default=None)
+    parser.add_argument(
+        "--skip-factors",
+        default="",
+        help="Comma-separated factor names to omit, e.g. latent",
+    )
+    parser.add_argument(
+        "--skip-tasks",
+        default="",
+        help="Comma-separated task names to omit, e.g. ag_news",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument(
+        "--only-factors",
+        default="",
+        help="Comma-separated factor labels to run, e.g. trust_200",
+    )
+    parser.add_argument(
+        "--svdd-validation-tie-break",
+        choices=("largest", "smallest", "median"),
+        default="largest",
+        help="Tie rule for equal validation accuracy among Top-K candidates.",
+    )
     args = parser.parse_args()
+
+    skip_factors = {
+        item.strip().lower()
+        for item in args.skip_factors.split(",")
+        if item.strip()
+    }
+    skip_tasks = {
+        item.strip().lower()
+        for item in args.skip_tasks.split(",")
+        if item.strip()
+    }
+    only_factors = {
+        item.strip().lower()
+        for item in args.only_factors.split(",")
+        if item.strip()
+    }
 
     seeds = tuple(_parse_csv(args.seeds, int))
     gpus = tuple(_parse_csv(args.gpus, int))
@@ -192,7 +239,13 @@ def main() -> int:
     requested: list[dict[str, Any]] = []
     for study, specs in (("parameter_sensitivity", _parameter_specs()), ("robustness", _robustness_specs())):
         for factor, label, factor_overrides in specs:
+            if only_factors and label.lower() not in only_factors:
+                continue
+            if factor.lower() in skip_factors or f"{study}:{factor}".lower() in skip_factors:
+                continue
             for task in TASKS:
+                if task.lower() in skip_tasks:
+                    continue
                 attacks = IMAGE_ATTACKS if task in IMAGE_TASKS else AG_NEWS_ATTACKS
                 for attack in attacks:
                     for seed in seeds:
@@ -200,7 +253,16 @@ def main() -> int:
                         overrides.update(factor_overrides)
                         key = (task, attack, seed, tuple(sorted(overrides.items())))
                         config_path, output_dir, result_path = _write_config(
-                            root, study, factor, label, task, attack, seed, args.rounds, factor_overrides
+                            root,
+                            study,
+                            factor,
+                            label,
+                            task,
+                            attack,
+                            seed,
+                            args.rounds,
+                            factor_overrides,
+                            args.svdd_validation_tie_break,
                         )
                         requested.append({
                             "study": study, "factor": factor, "label": label,
@@ -263,7 +325,8 @@ def main() -> int:
         "workers_per_gpu": args.workers_per_gpu,
         "gpu_memory_budget_gb": args.gpu_memory_budget_gb,
         "fixed": dict(BASE_OVERRIDES),
-        "topk_reject_ratios": [0.10, 0.20, 0.30, 0.40],
+        "svdd_validation_tie_break": args.svdd_validation_tie_break,
+        "topk_reject_ratios": [0.10, 0.20, 0.30, 0.40, 0.50],
         "requested_jobs": len(requested),
         "unique_jobs": len(canonical),
         "legacy_reused": legacy_reused,
