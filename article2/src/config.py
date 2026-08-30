@@ -189,6 +189,12 @@ class FedConfig:
     # best validation accuracy. ``largest`` preserves the historical rule;
     # ``median`` uses the numeric median of the tied rejection ratios.
     svdd_validation_tie_break: str = "largest"
+    # Client-selection rule used by the SVDD defense. ``topk_validation``
+    # preserves the historical validation-driven selector; ``mad_threshold``
+    # accepts finite clients whose anomaly score is at most
+    # median(score) + svdd_mad_k * MAD(score).
+    svdd_selection_method: str = "topk_validation"
+    svdd_mad_k: float = 3.0
     # Deprecated compatibility field.  ``legacy`` means reconstruction in
     # Phase 1 and SVDD distance in Phase 2.  A non-legacy value preserves old
     # sensitivity runs that applied one mode to both phases.

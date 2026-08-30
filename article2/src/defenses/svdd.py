@@ -216,6 +216,54 @@ class SVDDDefense(BaseDefense):
         self.global_model.load_state_dict(selected_state)
         return best_mask.float(), best_weights, best_ratio, best_accuracy, candidate_accuracies
 
+    def _select_by_mad_threshold(
+        self,
+        scores: Tensor,
+        client_state_dicts: List[Dict[str, Tensor]],
+    ) -> Tuple[Tensor, Tensor, float, float, Dict[str, float]]:
+        """Select clients using the configured median-plus-k-MAD cutoff."""
+
+        if scores.ndim != 1 or scores.numel() != len(client_state_dicts):
+            raise ValueError("MAD scores must match the client count.")
+        finite = torch.isfinite(scores)
+        if not bool(finite.any().item()):
+            raise FloatingPointError("All client scores are non-finite.")
+        k = float(getattr(self.config, "svdd_mad_k", 3.0))
+        if not math.isfinite(k) or k < 0.0:
+            raise ValueError("svdd_mad_k must be finite and non-negative.")
+        valid_scores = scores[finite]
+        median = valid_scores.median()
+        mad = (valid_scores - median).abs().median()
+        threshold = median + k * mad
+        accepted = finite & (scores <= threshold)
+        # The median itself is normally accepted; retain a deterministic
+        # fallback for unusual floating-point edge cases.
+        if not bool(accepted.any().item()):
+            finite_indices = torch.where(finite)[0]
+            accepted[finite_indices[torch.argmin(valid_scores)]] = True
+        weights = accepted.float() / accepted.sum().clamp_min(1.0)
+        selected_state = weighted_fedavg(
+            client_state_dicts, weights, device=self.aggregation_device
+        )
+        self.global_model.load_state_dict(selected_state)
+        reject_ratio = 1.0 - float(accepted.sum().item()) / float(len(client_state_dicts))
+        return accepted.float(), weights, reject_ratio, float("nan"), {}
+
+    def _select_clients(
+        self,
+        scores: Tensor,
+        client_state_dicts: List[Dict[str, Tensor]],
+    ) -> Tuple[Tensor, Tensor, float, float, Dict[str, float]]:
+        method = str(getattr(self.config, "svdd_selection_method", "topk_validation"))
+        method = method.lower().strip()
+        if method == "mad_threshold":
+            return self._select_by_mad_threshold(scores, client_state_dicts)
+        if method == "topk_validation":
+            return self._select_topk_by_validation(scores, client_state_dicts)
+        raise ValueError(
+            "svdd_selection_method must be 'topk_validation' or 'mad_threshold'."
+        )
+
     @staticmethod
     def _topk_candidate(
         finite_order: Tensor, reject_ratio: float, total_clients: int
@@ -327,7 +375,7 @@ class SVDDDefense(BaseDefense):
             selection_scores = per_client_loss
 
         keep_mask, weights, selected_ratio, validation_accuracy, candidates = (
-            self._select_topk_by_validation(
+            self._select_clients(
                 selection_scores.detach().cpu(), client_state_dicts
             )
         )
@@ -433,7 +481,7 @@ class SVDDDefense(BaseDefense):
             torch.full_like(selection_scores, float("inf")),
         )
         accepted_mask, aggregation_weights, selected_ratio, validation_accuracy, candidates = (
-            self._select_topk_by_validation(
+            self._select_clients(
                 selection_scores.detach().cpu(), client_state_dicts
             )
         )
