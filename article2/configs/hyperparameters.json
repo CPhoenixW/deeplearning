@@ -28,6 +28,8 @@
       "phase2_recon_quantile": 0.8
     },
     "dmc": {
+      "dmc_pca_dim": 10,
+      "dmc_min_cluster_size": 3,
       "dmc_ema_decay": 0.8
     },
     "tm": {
