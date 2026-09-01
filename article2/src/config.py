@@ -160,12 +160,17 @@ class FedConfig:
     flanders_alpha: float = 1.0
     flanders_beta: float = 1.0
     flanders_num_clients_to_keep: int | None = None
-    # FedDMC-style data-free multi-view malicious-client detector.  The
-    # detector fuses magnitude, direction, sign, sparsity and temporal
-    # consistency instead of assuming a particular attack family.
+    # FedDMC (TDSC 2024): PCA dimensionality reduction, BTBCN clustering
+    # with noise removal, and SEDC history correction.  The paper/official
+    # implementation uses k=10, min_cluster_size=3 and SEDC alpha=0.8.
+    dmc_pca_dim: int = 10
+    dmc_min_cluster_size: int = 3
+    dmc_ema_decay: float = 0.8
+    # Deprecated knobs from the previous in-repo multi-view approximation.
+    # They remain readable so old experiment JSON files do not break, but the
+    # paper-faithful FedDMC implementation ignores them.
     dmc_warmup_rounds: int = 3
     dmc_tau: float = 3.0
-    dmc_ema_decay: float = 0.8
     dmc_min_keep: int = 1
     dmc_norm_weight: float = 1.0
     dmc_direction_weight: float = 1.0
