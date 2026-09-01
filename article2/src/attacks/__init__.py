@@ -18,7 +18,13 @@ from .feddmc_backdoor import (
 from .gaussian import GaussianNoiseAttack
 from .label_flipping import LabelFlippingAttack
 from .lie import LieAttack, apply_lie_round, lie_parameters, rewrite_lie_uploads
-from .lit import LitAttack, apply_lit_round, lit_attack_metadata, rewrite_lit_uploads
+from .lit import (
+    LitAttack,
+    apply_lit_round,
+    lit_attack_metadata,
+    lit_parameters,
+    rewrite_lit_uploads,
+)
 from .mixed import (
     MixedAttack,
     apply_mixed_round,
@@ -74,6 +80,7 @@ __all__ = [
     "evaluate_feddmc_backdoor_asr",
     "evaluate_mixed_attack",
     "lit_attack_metadata",
+    "lit_parameters",
     "mixed_attack_for_client",
     "mixed_attack_ids",
     "mixed_attack_metadata",
