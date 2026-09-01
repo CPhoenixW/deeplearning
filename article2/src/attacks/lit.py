@@ -2,8 +2,8 @@
 
 This is deliberately distinct from ``lie.py``.  The project's existing ``lie``
 attack is the paper-faithful ALIE statistical model-poisoning construction from
-Baruch et al.  FedDMC's public ``LIT_attack`` uses that statistical envelope as
-part of a *targeted backdoor* procedure:
+Baruch et al.  FedDMC's public ``LIT_attack`` uses a related statistical envelope
+as part of a *targeted backdoor* procedure:
 
 1. malicious clients first perform ordinary local training;
 2. their mean local model is used as the starting point for a second, fully
@@ -14,12 +14,13 @@ part of a *targeted backdoor* procedure:
 
 The implementation below is algebraically expressed in model-delta space, which
 is equivalent to FedDMC's gradient-space code but avoids dividing by the local
-learning rate.  ``z`` follows the formula stated in the FedDMC paper via the
-same helper used by this project's ALIE implementation.
+learning rate.  ``z`` follows the formula stated in the FedDMC paper and is kept
+independent from this project's separate ``lie_z_override`` sensitivity knob.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Sequence, Tuple
 
 import torch
@@ -37,7 +38,6 @@ from .coordinated import (
     rewrite_crafted_uploads,
 )
 from .feddmc_backdoor import FEDDMC_TARGET_LABEL, poison_feddmc_prefix
-from .lie import lie_parameters
 
 
 class LitAttack(MaliciousClient):
@@ -73,6 +73,51 @@ class LitAttack(MaliciousClient):
             return super().local_step(start_state, reference_state_dict=start_state)
         finally:
             self._lit_backdoor_mode = False
+
+
+def lit_parameters(
+    config: FedConfig,
+    *,
+    attacker_count: int | None = None,
+) -> tuple[int, float]:
+    """Return FedDMC's paper-defined ``(s, z_max)`` for LIT.
+
+    FedDMC states
+
+    ``s = floor(N/2) + 1 - M`` and
+    ``z_max = Phi^-1((N-M-s)/(N-M))``.
+
+    This helper intentionally ignores ``config.lie_z_override`` because LIT and
+    the standalone ALIE/LIE attack are separate experiment families.
+    """
+
+    total = int(config.num_clients)
+    attackers = (
+        total - int(config.num_benign)
+        if attacker_count is None
+        else int(attacker_count)
+    )
+    if total < 3:
+        raise ValueError("FedDMC LIT requires at least three total clients.")
+    if attackers < 2 or attackers >= total:
+        raise ValueError("FedDMC LIT requires 2 <= malicious clients < num_clients.")
+
+    s = total // 2 + 1 - attackers
+    benign_count = total - attackers
+    cdf_value = float(benign_count - s) / float(benign_count)
+    if not 0.0 < cdf_value < 1.0:
+        raise ValueError(
+            "The FedDMC LIT formula produced an invalid normal quantile for the "
+            "configured client/malicious ratio."
+        )
+    normal = torch.distributions.Normal(
+        torch.tensor(0.0, dtype=torch.float64),
+        torch.tensor(1.0, dtype=torch.float64),
+    )
+    z = float(normal.icdf(torch.tensor(cdf_value, dtype=torch.float64)).item())
+    if not math.isfinite(z):
+        raise ValueError("FedDMC LIT z_max is non-finite.")
+    return s, z
 
 
 def _mean_state(
@@ -145,7 +190,7 @@ def rewrite_lit_uploads(
         raise ValueError("FedDMC LIT requires at least two malicious clients.")
     lit_clients = _resolve_lit_clients(clients, client_ids)
     names = attack_parameter_names(global_state, parameter_names)
-    _s, z = lie_parameters(config, attacker_count=len(client_ids))
+    _s, z = lit_parameters(config, attacker_count=len(client_ids))
 
     # FedDMC computes the mean of the first-pass malicious local models and
     # starts every targeted second pass from that same model.
@@ -233,14 +278,12 @@ def apply_lit_round(
 
 def validate_lit_config(config: FedConfig) -> None:
     malicious = int(config.num_clients) - int(config.num_benign)
-    if malicious < 2:
-        raise ValueError("FedDMC LIT requires at least two malicious clients.")
-    lie_parameters(config, attacker_count=malicious)
+    lit_parameters(config, attacker_count=malicious)
 
 
 def lit_attack_metadata(config: FedConfig) -> Dict[str, object]:
     malicious = int(config.num_clients) - int(config.num_benign)
-    s, z = lie_parameters(config, attacker_count=malicious)
+    s, z = lit_parameters(config, attacker_count=malicious)
     return {
         "lit_variant": "FedDMC targeted LIT_attack",
         "lit_coordinate_space": "model_delta",
@@ -259,6 +302,7 @@ __all__ = [
     "LitAttack",
     "apply_lit_round",
     "lit_attack_metadata",
+    "lit_parameters",
     "rewrite_lit_uploads",
     "validate_lit_config",
 ]
