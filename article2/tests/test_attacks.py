@@ -48,13 +48,14 @@ def test_every_non_clean_attack_is_implemented_in_attacks_package() -> None:
         "sf",
         "bd",
         "lie",
+        "lit",
         "minmax",
         "minsum",
         "mix",
     }
-    assert set(ROUND_ATTACK_HOOKS) == {"lie", "minmax", "minsum", "mix"}
-    assert set(ATTACK_EVALUATORS) == {"bd", "mix"}
-    assert set(ATTACK_METADATA_BUILDERS) == {"lie", "minmax", "minsum", "mix"}
+    assert set(ROUND_ATTACK_HOOKS) == {"lie", "lit", "minmax", "minsum", "mix"}
+    assert set(ATTACK_EVALUATORS) == {"bd", "lit", "mix"}
+    assert set(ATTACK_METADATA_BUILDERS) == {"lie", "lit", "minmax", "minsum", "mix"}
     assert all(
         attack_id == "none" or attack.__module__.startswith("src.attacks.")
         for attack_id, attack in ATTACK_REGISTRY.items()
