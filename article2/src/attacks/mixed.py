@@ -35,6 +35,15 @@ def mixed_attack_ids(config: FedConfig) -> Tuple[str, ...]:
         raise ValueError("mixed_attack_types must contain at least one attack id")
     if any(attack_id in {"none", "mix"} for attack_id in attack_ids):
         raise ValueError("mixed_attack_types cannot contain 'none' or nested 'mix'")
+    if "lit" in attack_ids:
+        # FedDMC's released LIT construction is a coordinated two-pass attack
+        # over the whole malicious population.  The source does not define how
+        # that second pass should be composed with heterogeneous attack
+        # families, so do not silently invent a mixed-LIT variant.
+        raise ValueError(
+            "FedDMC 'lit' is supported as a standalone attack only; the released "
+            "method does not define a heterogeneous mixed-LIT construction."
+        )
 
     # Local import avoids a registry/module initialization cycle.
     from .registry import ATTACK_REGISTRY
