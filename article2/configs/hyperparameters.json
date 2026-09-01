@@ -28,16 +28,9 @@
       "phase2_recon_quantile": 0.8
     },
     "dmc": {
-      "dmc_warmup_rounds": 3,
-      "dmc_tau": 3.0,
-      "dmc_ema_decay": 0.8,
-      "dmc_min_keep": 1,
-      "dmc_norm_weight": 1.0,
-      "dmc_direction_weight": 1.0,
-      "dmc_sign_weight": 1.0,
-      "dmc_sparsity_weight": 0.5,
-      "dmc_temporal_weight": 1.0,
-      "dmc_score_ema_decay": 0.7
+      "dmc_pca_dim": 10,
+      "dmc_min_cluster_size": 3,
+      "dmc_ema_decay": 0.8
     },
     "tm": {
       "trimmed_mean_ratio": 0.2,

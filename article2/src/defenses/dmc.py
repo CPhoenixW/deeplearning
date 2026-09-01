@@ -1,8 +1,22 @@
-"""Data-free multi-view malicious-client detection (FedDMC-style)."""
+"""Paper-faithful FedDMC defense (TDSC 2024).
+
+FedDMC detects malicious federated-learning clients with three server-side
+modules described by Mu et al.:
+
+1. DR: PCA projection of client model parameters.
+2. BTBCN: binary-tree clustering with noise removal.
+3. SEDC: exponential moving-average correction of per-round detections.
+
+The implementation deliberately avoids a clean validation set and does not use
+the true number of malicious clients.  PCA is computed from the client Gram
+matrix in chunks, so large models do not require materialising one giant
+``num_clients x num_parameters`` tensor.
+"""
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -10,15 +24,39 @@ from torch import Tensor, nn
 from ..config import FedConfig
 from ..utils import weighted_fedavg
 from .base import BaseDefense, DefenseResult as RoundStats
-from .common import _flatten_param_delta
+
+
+# The paper/official implementation uses k=10 by default and
+# min_cluster_size=3 in the BTBCN experiments.  Keep those as paper defaults
+# while allowing an experiment to attach explicit attributes to FedConfig.
+_DEFAULT_PCA_DIM = 10
+_DEFAULT_MIN_CLUSTER_SIZE = 3
+_PCA_CHUNK_SIZE = 65_536
+
+
+@dataclass
+class _ClusterNode:
+    """One node in the agglomerative binary clustering tree."""
+
+    node_id: int
+    members: Tuple[int, ...]
+    centroid: Tensor
+    left: Optional["_ClusterNode"] = None
+    right: Optional["_ClusterNode"] = None
+    merge_cost: float = 0.0
+
+    @property
+    def size(self) -> int:
+        return len(self.members)
 
 
 class DMCDefense(BaseDefense):
-    """Fuse magnitude, direction, sign, sparsity and temporal anomaly views.
+    """FedDMC = PCA dimensionality reduction + BTBCN + SEDC.
 
-    The detector remains data-free: it only uses the client model deltas visible
-    to the server.  A robust median/MAD threshold creates the hard acceptance
-    mask, while the accepted clients receive score-dependent trust weights.
+    ``dmc_ema_decay`` is reused as the paper's SEDC ensemble coefficient
+    :math:`alpha`.  The legacy multi-view DMC knobs remain in ``FedConfig`` for
+    compatibility with older experiment files, but they are not part of the
+    FedDMC method and therefore are intentionally ignored here.
     """
 
     defense_name = "dmc"
@@ -31,78 +69,279 @@ class DMCDefense(BaseDefense):
         model_fn: Callable[[], nn.Module],
     ) -> None:
         super().__init__(config, d_bn, device, model_fn)
-        self._raw_ema: Optional[Tensor] = None
-        self._score_ema: Optional[Tensor] = None
+        self._trust: Optional[Tensor] = None
+
+    # ------------------------------------------------------------------
+    # Module 1: DR (PCA)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _state_is_finite(
+        state: Dict[str, Tensor], parameter_names: Sequence[str]
+    ) -> bool:
+        return all(
+            name in state and bool(torch.isfinite(state[name]).all().item())
+            for name in parameter_names
+        )
+
+    def _pca_scores(
+        self,
+        client_state_dicts: Sequence[Dict[str, Tensor]],
+        client_indices: Sequence[int],
+        k: int,
+    ) -> Tensor:
+        """Return PCA coordinates for selected clients using a chunked Gram matrix.
+
+        Let X be the client-by-parameter matrix after centering every model
+        parameter coordinate across clients.  Standard PCA scores can be
+        obtained from ``X X^T``.  Accumulating that Gram matrix parameter chunk
+        by parameter chunk is algebraically equivalent to flattening every full
+        model first, while using substantially less peak memory.
+        """
+
+        count = len(client_indices)
+        if count == 0:
+            return torch.zeros((0, 1), dtype=torch.float32)
+        if count == 1:
+            return torch.zeros((1, 1), dtype=torch.float32)
+
+        gram = torch.zeros((count, count), dtype=torch.float64)
+        for name in self.param_names:
+            reference = client_state_dicts[client_indices[0]][name]
+            size = int(reference.numel())
+            for start in range(0, size, _PCA_CHUNK_SIZE):
+                end = min(size, start + _PCA_CHUNK_SIZE)
+                block = torch.stack(
+                    [
+                        client_state_dicts[index][name]
+                        .detach()
+                        .cpu()
+                        .reshape(-1)[start:end]
+                        .to(dtype=torch.float64)
+                        for index in client_indices
+                    ],
+                    dim=0,
+                )
+                block = block - block.mean(dim=0, keepdim=True)
+                gram.add_(block @ block.T)
+
+        gram = 0.5 * (gram + gram.T)
+        eigenvalues, eigenvectors = torch.linalg.eigh(gram)
+        order = torch.argsort(eigenvalues, descending=True)
+        eigenvalues = eigenvalues[order].clamp_min(0.0)
+        eigenvectors = eigenvectors[:, order]
+
+        max_components = max(1, min(int(k), count - 1))
+        positive = int((eigenvalues > 1e-12).sum().item())
+        if positive == 0:
+            return torch.zeros((count, 1), dtype=torch.float32)
+        components = min(max_components, positive)
+        values = eigenvalues[:components]
+        vectors = eigenvectors[:, :components]
+        # X = U S V^T, therefore PCA sample coordinates are U S.
+        scores = vectors * torch.sqrt(values).view(1, -1)
+        return scores.to(dtype=torch.float32)
+
+    # ------------------------------------------------------------------
+    # Module 2: BTBCN
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ward_cost(a: _ClusterNode, b: _ClusterNode) -> float:
+        """Ward merge criterion used by the authors' public implementation."""
+
+        diff = a.centroid - b.centroid
+        scale = float(a.size * b.size) / float(a.size + b.size)
+        return scale * float(torch.dot(diff, diff).item())
+
+    @classmethod
+    def _build_binary_tree(cls, points: Tensor) -> _ClusterNode:
+        """Construct the hierarchical binary tree by repeated closest merging."""
+
+        count = int(points.shape[0])
+        if count < 1:
+            raise ValueError("BTBCN requires at least one point")
+        active: Dict[int, _ClusterNode] = {
+            index: _ClusterNode(
+                node_id=index,
+                members=(index,),
+                centroid=points[index].detach().cpu().float().clone(),
+            )
+            for index in range(count)
+        }
+        next_id = count
+
+        while len(active) > 1:
+            ids = sorted(active)
+            best_pair: Optional[Tuple[int, int]] = None
+            best_key: Optional[Tuple[float, int, int]] = None
+            for offset, left_id in enumerate(ids[:-1]):
+                left = active[left_id]
+                for right_id in ids[offset + 1 :]:
+                    right = active[right_id]
+                    cost = cls._ward_cost(left, right)
+                    key = (cost, left_id, right_id)
+                    if best_key is None or key < best_key:
+                        best_key = key
+                        best_pair = (left_id, right_id)
+
+            assert best_pair is not None and best_key is not None
+            left_id, right_id = best_pair
+            left = active.pop(left_id)
+            right = active.pop(right_id)
+            size = left.size + right.size
+            centroid = (
+                left.centroid * float(left.size)
+                + right.centroid * float(right.size)
+            ) / float(size)
+            merged = _ClusterNode(
+                node_id=next_id,
+                members=tuple(sorted(left.members + right.members)),
+                centroid=centroid,
+                left=left,
+                right=right,
+                merge_cost=float(best_key[0]),
+            )
+            active[next_id] = merged
+            next_id += 1
+
+        return next(iter(active.values()))
 
     @staticmethod
-    def _robust_z(values: Tensor) -> Tensor:
-        values = torch.nan_to_num(
-            values.float(), nan=0.0, posinf=1e6, neginf=-1e6
-        )
-        median = values.median()
-        mad = (values - median).abs().median()
-        scale = torch.clamp(1.4826 * mad, min=1e-6)
-        return ((values - median).abs() / scale).clamp(max=1e6)
+    def _condense_tree(
+        root: _ClusterNode,
+        min_cluster_size: int,
+    ) -> Tuple[Tensor, Tensor, Dict[str, int]]:
+        """Apply the paper's condensed-tree noise removal and binary decision.
 
-    def _views(self, deltas: Tensor) -> Tensor:
-        clients, _parameters = deltas.shape
-        finite = torch.isfinite(deltas).all(dim=1)
-        safe = torch.nan_to_num(
-            deltas.float(), nan=0.0, posinf=0.0, neginf=0.0
-        )
+        Children smaller than ``min_cluster_size`` are pruned as noisy points.
+        Once both children are large enough, the larger child is considered the
+        benign cluster, consistent with the paper's assumption that fewer than
+        half of the clients are malicious.  Pruned noisy points are rejected.
+        """
 
-        center = safe.median(dim=0).values
-        center_norm = center.norm().clamp_min(1e-12)
-        norms = safe.norm(dim=1)
-        norm_view = self._robust_z(norms)
+        total = root.size
+        min_size = max(1, int(min_cluster_size))
+        outliers: set[int] = set()
+        current: Optional[_ClusterNode] = root
 
-        cosine = (safe @ center) / (
-            safe.norm(dim=1).clamp_min(1e-12) * center_norm
-        )
-        direction_view = self._robust_z(1.0 - cosine.clamp(-1.0, 1.0))
+        while (
+            current is not None
+            and current.left is not None
+            and current.right is not None
+        ):
+            left = current.left
+            right = current.right
+            left_small = left.size < min_size
+            right_small = right.size < min_size
+            if not left_small and not right_small:
+                break
+            if left_small and right_small:
+                # No valid binary split remains.  Keep the current subtree as
+                # benign rather than inventing a malicious cluster unsupported
+                # by the FedDMC rule; already-pruned noisy points stay rejected.
+                break
+            if left_small:
+                outliers.update(left.members)
+                current = right
+            else:
+                outliers.update(right.members)
+                current = left
 
-        sign_center = torch.sign(safe.sum(dim=0))
-        active = sign_center != 0
-        if bool(active.any().item()):
-            signs = torch.sign(safe[:, active])
-            sign_agreement = (signs * sign_center[active]).mean(dim=1)
-            raw_sign = 1.0 - sign_agreement
-            sign_view = self._robust_z(raw_sign)
-        else:
-            raw_sign = torch.zeros(clients, dtype=torch.float32)
-            sign_view = torch.zeros(clients, dtype=torch.float32)
+            # FedDMC assumes M < floor(N/2).  If noise pruning would exceed
+            # that model, stop pruning and preserve the remaining majority.
+            if len(outliers) > total // 2:
+                break
 
-        nonzero = (safe.abs() > 1e-12).float().mean(dim=1)
-        sparsity_view = self._robust_z(nonzero)
+        benign: set[int] = set()
+        malicious: set[int] = set(outliers)
+        left_size = 0
+        right_size = 0
 
-        raw = torch.stack([norms, 1.0 - cosine, raw_sign, nonzero], dim=1)
-        raw = torch.nan_to_num(raw, nan=0.0, posinf=1e6, neginf=0.0)
-        if self._raw_ema is None or self._raw_ema.shape != raw.shape:
-            temporal_view = torch.zeros(clients, dtype=torch.float32)
-            self._raw_ema = raw.detach().clone()
-        else:
-            temporal_raw = (raw - self._raw_ema).abs().mean(dim=1)
-            temporal_view = self._robust_z(temporal_raw)
-            decay = min(
-                1.0,
-                max(0.0, float(getattr(self.config, "dmc_ema_decay", 0.8))),
+        if current is not None:
+            if current.left is None or current.right is None:
+                benign.update(current.members)
+            else:
+                left = current.left
+                right = current.right
+                left_size = left.size
+                right_size = right.size
+                if left.size > right.size:
+                    benign.update(left.members)
+                    malicious.update(right.members)
+                elif right.size > left.size:
+                    benign.update(right.members)
+                    malicious.update(left.members)
+                else:
+                    # The paper only defines the larger cluster as benign.
+                    # With an exact tie there is no paper-defined discriminator,
+                    # so do not arbitrarily reject half of the clients.
+                    benign.update(current.members)
+
+        # Any point not explicitly assigned benign is treated as rejected/noise.
+        malicious.update(set(range(total)) - benign)
+        benign.difference_update(malicious)
+
+        benign_mask = torch.zeros(total, dtype=torch.float32)
+        if benign:
+            benign_mask[list(sorted(benign))] = 1.0
+        outlier_mask = torch.zeros(total, dtype=torch.float32)
+        if outliers:
+            outlier_mask[list(sorted(outliers))] = 1.0
+        info = {
+            "raw_benign": int(benign_mask.sum().item()),
+            "raw_malicious": int(total - benign_mask.sum().item()),
+            "outliers": len(outliers),
+            "left_size": left_size,
+            "right_size": right_size,
+        }
+        return benign_mask, outlier_mask, info
+
+    def _btbcn(
+        self,
+        points: Tensor,
+        min_cluster_size: int,
+    ) -> Tuple[Tensor, Tensor, Dict[str, int]]:
+        count = int(points.shape[0])
+        if count == 0:
+            return (
+                torch.zeros(0, dtype=torch.float32),
+                torch.zeros(0, dtype=torch.float32),
+                {"raw_benign": 0, "raw_malicious": 0, "outliers": 0, "left_size": 0, "right_size": 0},
             )
-            self._raw_ema = (
-                decay * self._raw_ema + (1.0 - decay) * raw.detach()
-            )
+        if count < 2 or float(points.abs().max().item()) <= 1e-12:
+            benign = torch.ones(count, dtype=torch.float32)
+            return benign, torch.zeros_like(benign), {
+                "raw_benign": count,
+                "raw_malicious": 0,
+                "outliers": 0,
+                "left_size": count,
+                "right_size": 0,
+            }
+        tree = self._build_binary_tree(points)
+        return self._condense_tree(tree, min_cluster_size)
 
-        views = torch.stack(
-            [
-                norm_view,
-                direction_view,
-                sign_view,
-                sparsity_view,
-                temporal_view,
-            ],
-            dim=1,
-        )
-        views[~finite] = 1e6
-        return torch.nan_to_num(views, nan=0.0, posinf=1e6, neginf=0.0)
+    # ------------------------------------------------------------------
+    # Module 3: SEDC and aggregation
+    # ------------------------------------------------------------------
+    def _sedc(self, raw_benign: Tensor) -> Tuple[Tensor, Tensor]:
+        clients = int(raw_benign.numel())
+        if self._trust is None or self._trust.numel() != clients:
+            self._trust = torch.full((clients,), 0.5, dtype=torch.float32)
+
+        alpha = float(getattr(self.config, "dmc_ema_decay", 0.8))
+        alpha = min(max(alpha, 0.0), 1.0 - 1e-8)
+        self._trust = (
+            alpha * self._trust + (1.0 - alpha) * raw_benign.float()
+        ).detach()
+        accepted = (self._trust >= 0.5).float()
+        return self._trust.clone(), accepted
+
+    @staticmethod
+    def _paper_parameter(config: FedConfig, name: str, default: int) -> int:
+        value = getattr(config, name, default)
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return int(default)
 
     def _aggregate(
         self,
@@ -111,130 +350,114 @@ class DMCDefense(BaseDefense):
     ) -> RoundStats:
         clients = len(client_state_dicts)
         if clients == 0:
-            raise ValueError("DMC requires at least one client update")
+            raise ValueError("FedDMC requires at least one client update")
 
-        global_state = self.state_dict_for_clients()
-        deltas = torch.stack(
+        valid_mask = torch.tensor(
             [
-                _flatten_param_delta(global_state, state, self.param_names)
+                self._state_is_finite(state, self.param_names)
                 for state in client_state_dicts
             ],
-            dim=0,
-        ).float()
-        valid_rows = torch.isfinite(deltas).all(dim=1)
-        views = self._views(deltas)
-
-        view_weights = torch.tensor(
-            [
-                float(getattr(self.config, "dmc_norm_weight", 1.0)),
-                float(getattr(self.config, "dmc_direction_weight", 1.0)),
-                float(getattr(self.config, "dmc_sign_weight", 1.0)),
-                float(getattr(self.config, "dmc_sparsity_weight", 0.5)),
-                float(getattr(self.config, "dmc_temporal_weight", 1.0)),
-            ],
-            dtype=torch.float32,
-        ).clamp_min(0.0)
-        if float(view_weights.sum().item()) <= 0.0:
-            view_weights.fill_(1.0)
-        view_weights = view_weights / view_weights.sum()
-        score = (views * view_weights.view(1, -1)).sum(dim=1)
-
-        score_decay = min(
-            1.0,
-            max(
-                0.0,
-                float(getattr(self.config, "dmc_score_ema_decay", 0.7)),
-            ),
+            dtype=torch.bool,
         )
-        if self._score_ema is None or self._score_ema.numel() != clients:
-            self._score_ema = score.detach().clone()
-        else:
-            self._score_ema = (
-                score_decay * self._score_ema
-                + (1.0 - score_decay) * score.detach()
+        valid_indices = torch.where(valid_mask)[0].tolist()
+
+        pca_dim = self._paper_parameter(
+            self.config, "dmc_pca_dim", _DEFAULT_PCA_DIM
+        )
+        min_cluster_size = self._paper_parameter(
+            self.config,
+            "dmc_min_cluster_size",
+            _DEFAULT_MIN_CLUSTER_SIZE,
+        )
+
+        raw_benign = torch.zeros(clients, dtype=torch.float32)
+        outlier_full = torch.zeros(clients, dtype=torch.float32)
+        pca_norm = torch.zeros(clients, dtype=torch.float32)
+        cluster_info = {
+            "raw_benign": 0,
+            "raw_malicious": clients,
+            "outliers": 0,
+            "left_size": 0,
+            "right_size": 0,
+        }
+
+        if valid_indices:
+            reduced = self._pca_scores(client_state_dicts, valid_indices, pca_dim)
+            local_benign, local_outliers, cluster_info = self._btbcn(
+                reduced, min_cluster_size
             )
-        score = self._score_ema.clone()
+            raw_benign[valid_indices] = local_benign
+            outlier_full[valid_indices] = local_outliers
+            pca_norm[valid_indices] = reduced.norm(dim=1)
 
-        warmup = max(0, int(getattr(self.config, "dmc_warmup_rounds", 3)))
-        tau = max(0.0, float(getattr(self.config, "dmc_tau", 3.0)))
-        median = score.median()
-        mad = (score - median).abs().median()
-        threshold = median + tau * max(float(1.4826 * mad.item()), 1e-6)
-        accepted = torch.ones(clients, dtype=torch.float32)
-        if round_idx > warmup and float(mad.item()) > 1e-8:
-            accepted = (score <= threshold).float()
-        accepted[~valid_rows] = 0.0
+        # Non-finite uploads are never allowed through SEDC.
+        trust, accepted = self._sedc(raw_benign)
+        accepted[~valid_mask] = 0.0
+        trust[~valid_mask] = 0.0
+        if self._trust is not None:
+            self._trust[~valid_mask] = 0.0
 
-        min_keep = max(
-            1,
-            min(clients, int(getattr(self.config, "dmc_min_keep", 1))),
-        )
-        if int(accepted.sum().item()) < min_keep:
-            accepted.zero_()
-            valid_indices = torch.where(valid_rows)[0]
-            if valid_indices.numel() > 0:
-                keep_indices = valid_indices[
-                    torch.argsort(score[valid_indices])[:min_keep]
-                ]
-            else:
-                keep_indices = torch.argsort(score)[:min_keep]
-            accepted[keep_indices] = 1.0
+        accepted_indices = torch.where(accepted >= 0.5)[0].tolist()
+        if not accepted_indices:
+            # Degenerate fallback: if SEDC rejects everybody, preserve the
+            # current global model instead of aggregating an undefined set.
+            new_global_state = self.state_dict_for_clients()
+            participant_weights = torch.zeros(clients, dtype=torch.float32)
+        else:
+            participant_weights = torch.zeros(clients, dtype=torch.float32)
+            participant_weights[accepted_indices] = 1.0 / float(
+                len(accepted_indices)
+            )
+            selected_states = [client_state_dicts[index] for index in accepted_indices]
+            selected_weights = torch.full(
+                (len(accepted_indices),),
+                1.0 / float(len(accepted_indices)),
+                dtype=torch.float32,
+            )
+            new_global_state = weighted_fedavg(
+                selected_states,
+                selected_weights,
+                device=self.aggregation_device,
+            )
+            self.global_model.load_state_dict(new_global_state)
 
-        trust = (1.0 / (1.0 + score.clamp_min(0.0))) * accepted
-        if float(trust.sum().item()) <= 1e-12:
-            trust = accepted.clone()
-        participant_weights = trust / trust.sum().clamp_min(1e-12)
+        anomaly_score = 1.0 - trust
+        kept = int((accepted >= 0.5).sum().item())
+        alpha = float(getattr(self.config, "dmc_ema_decay", 0.8))
 
-        aggregation_states: List[Dict[str, Tensor]] = []
-        for row_valid, state in zip(valid_rows.tolist(), client_state_dicts):
-            if row_valid:
-                aggregation_states.append(state)
-                continue
-            cleaned: Dict[str, Tensor] = {}
-            for name, global_value in global_state.items():
-                value = state[name].detach().cpu()
-                if value.is_floating_point():
-                    cleaned[name] = torch.where(
-                        torch.isfinite(value),
-                        value,
-                        global_value.detach().cpu(),
-                    ).clone()
-                else:
-                    cleaned[name] = global_value.detach().cpu().clone()
-            aggregation_states.append(cleaned)
-
-        new_global_state = weighted_fedavg(
-            aggregation_states,
-            participant_weights.detach().cpu(),
-            device=self.aggregation_device,
-        )
-        self.global_model.load_state_dict(new_global_state)
-
-        kept = int(accepted.sum().item())
-        phase = (
-            "dmc | Warm-up"
-            if round_idx <= warmup
-            else "dmc | Multi-view Filtering"
-        )
         return RoundStats(
             center_norm=float("nan"),
-            z_var=float(torch.var(score).item()) if clients > 1 else 0.0,
+            z_var=float(torch.var(anomaly_score).item()) if clients > 1 else 0.0,
             ae_loss=float("nan"),
             svdd_loss=float("nan"),
-            d=score.detach().cpu(),
+            d=anomaly_score.detach().cpu(),
             m=accepted.detach().cpu(),
             alpha=participant_weights.detach().cpu(),
-            phase=phase,
+            phase="dmc | PCA + BTBCN + SEDC",
             show_detection=True,
             monitor_items=[
-                ("Defense", "FedDMC (multi-view)"),
-                ("Score threshold", f"{float(threshold):.4f}"),
+                ("Defense", "FedDMC (TDSC 2024)"),
+                ("PCA dimension", str(min(pca_dim, max(1, len(valid_indices) - 1)))),
+                ("min_cluster_size", str(min_cluster_size)),
+                ("SEDC alpha", f"{alpha:.4f}"),
+                ("BTBCN benign", f"{cluster_info['raw_benign']}/{len(valid_indices)}"),
+                ("BTBCN outliers", str(cluster_info["outliers"])),
                 ("Kept clients", f"{kept}/{clients}"),
-                ("Views", "norm+direction+sign+sparsity+temporal"),
-                ("Score avg", f"{float(score.mean().item()):.4f}"),
             ],
+            server_metrics={
+                "feddmc_pca_dim": int(pca_dim),
+                "feddmc_min_cluster_size": int(min_cluster_size),
+                "feddmc_sedc_alpha": float(alpha),
+                "feddmc_raw_benign": int(cluster_info["raw_benign"]),
+                "feddmc_raw_malicious": int(cluster_info["raw_malicious"]),
+                "feddmc_outliers": int(cluster_info["outliers"]),
+                "feddmc_valid_clients": int(valid_mask.sum().item()),
+            },
             participant_metrics={
-                "anomaly_score": score.detach().cpu(),
+                "feddmc_trust": trust.detach().cpu(),
+                "feddmc_raw_benign": raw_benign.detach().cpu(),
+                "feddmc_outlier": outlier_full.detach().cpu(),
+                "feddmc_pca_norm": pca_norm.detach().cpu(),
                 "aggregation_weight": participant_weights.detach().cpu(),
             },
         )
