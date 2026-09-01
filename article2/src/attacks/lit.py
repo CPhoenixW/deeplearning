@@ -14,7 +14,6 @@ https://github.com/MuXutong/FedDMC/blob/main/attack.py
 
 from __future__ import annotations
 
-import math
 from typing import Dict, List, Sequence
 
 import torch
@@ -30,6 +29,12 @@ from .coordinated import (
     empty_crafted_delta,
     rewrite_crafted_uploads,
 )
+
+# Constants used literally by the released FedDMC code for its default
+# 28-malicious-client LIT experiment.  Keeping them attack-local prevents this
+# implementation from silently inheriting the different generic BD settings.
+FEDDMC_LIT_Z = 0.48
+FEDDMC_LIT_POISON_RATIO = 0.2
 
 
 class LitAttack(BackdoorAttack):
@@ -49,14 +54,13 @@ class LitAttack(BackdoorAttack):
         if not self._lit_backdoor_training:
             return x, y
 
-        poison_ratio = float(self.config.lit_backdoor_poison_ratio)
         target = int(self.config.backdoor_target_label)
         trigger_size = int(self.config.backdoor_trigger_size)
         trigger_value = float(self.config.backdoor_trigger_value)
 
-        if poison_ratio <= 0.0 or trigger_size <= 0:
+        if FEDDMC_LIT_POISON_RATIO <= 0.0 or trigger_size <= 0:
             return x, y
-        mask = torch.rand(y.shape[0], device=self.device) < poison_ratio
+        mask = torch.rand(y.shape[0], device=self.device) < FEDDMC_LIT_POISON_RATIO
         if not bool(mask.any().item()):
             return x, y
 
@@ -116,12 +120,6 @@ def validate_lit_config(config: FedConfig) -> None:
     malicious = int(config.num_clients) - int(config.num_benign)
     if malicious < 2:
         raise ValueError("FedDMC LIT requires at least two malicious clients.")
-    z = float(config.lit_z)
-    if not math.isfinite(z) or z < 0.0:
-        raise ValueError("lit_z must be a finite non-negative value.")
-    poison_ratio = float(config.lit_backdoor_poison_ratio)
-    if not 0.0 <= poison_ratio <= 1.0:
-        raise ValueError("lit_backdoor_poison_ratio must be in [0, 1].")
     if float(config.client_lr) <= 0.0:
         raise ValueError("FedDMC LIT requires client_lr > 0.")
 
@@ -130,8 +128,8 @@ def lit_attack_metadata(config: FedConfig) -> Dict[str, object]:
     return {
         "lit_variant": "FedDMC LIT (Mu et al., IEEE TDSC 2024)",
         "lit_coordinate_space": "gradient",
-        "lit_z": float(config.lit_z),
-        "lit_backdoor_poison_ratio": float(config.lit_backdoor_poison_ratio),
+        "lit_z": FEDDMC_LIT_Z,
+        "lit_backdoor_poison_ratio": FEDDMC_LIT_POISON_RATIO,
         "lit_target_label": int(config.backdoor_target_label),
         "lit_trigger_size": int(config.backdoor_trigger_size),
     }
@@ -240,7 +238,6 @@ def rewrite_lit_uploads(
             )
         backdoor_states.append(client.backdoor_step(params_mean))
 
-    z = float(config.lit_z)
     crafted_delta = empty_crafted_delta(global_state, names)
 
     for name in names:
@@ -267,8 +264,8 @@ def rewrite_lit_uploads(
             #   mal_params = original_params - lr * new_grads
             new_params = mal_net_chunk + lr * grads_mean_flat[start:end]
             new_grads = (params_mean_flat[start:end] - new_params) / lr
-            lower = grads_mean_flat[start:end] - z * grads_std_flat[start:end]
-            upper = grads_mean_flat[start:end] + z * grads_std_flat[start:end]
+            lower = grads_mean_flat[start:end] - FEDDMC_LIT_Z * grads_std_flat[start:end]
+            upper = grads_mean_flat[start:end] + FEDDMC_LIT_Z * grads_std_flat[start:end]
             clipped_grads = torch.maximum(torch.minimum(new_grads, upper), lower)
             mal_params = reference[start:end] - lr * clipped_grads
             crafted_flat[start:end] = mal_params - reference[start:end]
@@ -304,12 +301,14 @@ def apply_lit_round(
     )
 
 
-# Re-export the generic trigger-based ASR evaluator under a LIT-specific name
-# for clarity at registration sites.
+# FedDMC reports trigger-based ASR for LIT, so reuse the repository's generic
+# backdoor evaluator with the same target/trigger configuration.
 evaluate_lit_attack = evaluate_backdoor_attack
 
 
 __all__ = [
+    "FEDDMC_LIT_POISON_RATIO",
+    "FEDDMC_LIT_Z",
     "LitAttack",
     "apply_lit_round",
     "evaluate_lit_attack",
