@@ -113,19 +113,14 @@ class FedConfig:
     ae_lr: float = 1e-3
     ae_weight_decay: float = 1e-6
     ae_grad_clip: float = 1.0
-    # Unified fixed-descriptor input. ``absolute`` describes client weights and
-    # ``delta`` describes client weights minus the pre-round global weights.
-    # Both modes map the complete parameter state to 4096 dimensions and use
-    # mean/std scaling afterwards.
+    # The fixed layer-aware descriptor maps complete parameter states to 4096
+    # dimensions and uses the selected normalization afterwards.
     svdd_input_mode: str = "absolute"
     svdd_input_dim: int = 4096
     svdd_normalization: str = "mean_std"
     svdd_normalization_eps: float = 1e-6
     svdd_descriptor_seed: int = 2027
     svdd_descriptor_device: str = "auto"
-    svdd_descriptor_global_ratio: float = 0.5
-    svdd_descriptor_layer_ratio: float = 0.375
-    svdd_descriptor_statistics_ratio: float = 0.125
 
     # --- Phase schedule ---
     phase1_rounds: int = 15

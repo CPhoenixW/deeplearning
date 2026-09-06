@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.nn.utils import clip_grad_norm_
 
 from ..config import FedConfig
-from ..fixed_descriptor import FixedHierarchicalMultiViewDescriptor
+from ..fixed_descriptor import FixedLayerDescriptor
 from ..models import AutoEncoder
 from ..utils import (
     weighted_fedavg,
@@ -78,15 +78,12 @@ class SVDDDefense(BaseDefense):
         self._zero_reference = {
             name: torch.zeros_like(reference[name]) for name in self.param_names
         }
-        self.descriptor = FixedHierarchicalMultiViewDescriptor(
+        self.descriptor = FixedLayerDescriptor(
             reference,
             parameter_names=self.param_names,
             output_dim=self.INPUT_DIM,
             seed=int(getattr(config, "svdd_descriptor_seed", 2027)),
             projection_device=projection_device,
-            global_ratio=float(getattr(config, "svdd_descriptor_global_ratio", 0.5)),
-            layer_ratio=float(getattr(config, "svdd_descriptor_layer_ratio", 0.375)),
-            statistics_ratio=float(getattr(config, "svdd_descriptor_statistics_ratio", 0.125)),
         )
         # Keep the configured latent dimension so the sensitivity sweep can
         # evaluate both compressed and overcomplete representations.
