@@ -61,7 +61,7 @@ The attack implementations are modular client components under `src/attacks`. Va
 | ID       | Family              | Upload or data transformation                                | Primary value                                               |
 | -------- | ------------------- | ------------------------------------------------------------ | ----------------------------------------------------------- |
 | None     | Control             | Ordinary local training                                      | No malicious clients                                        |
-| LF       | Data poisoning      | Uniformly random replacement label, excluding the original class | Fixed by the task label space                               |
+| LF       | Data poisoning      | Symmetric label map, `y' = C - 1 - y`                        | Fixed by the task label space                               |
 | GN       | Byzantine poisoning | Moment-matched Gaussian replacement of floating tensors      | `gaussian_sigma = 0.3`                                      |
 | SF       | Byzantine poisoning | Upload `W_g - s(W_l - W_g)`                                  | `sign_flip_scale = 1.0`                                     |
 | LIE      | Byzantine poisoning | Craft delta as `mu + z sigma` from benign updates            | `lie_z_override = 0.524`                                    |
