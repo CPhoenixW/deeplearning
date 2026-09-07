@@ -11,7 +11,7 @@ from .distance import (
     rewrite_minsum_uploads,
 )
 from .gaussian import GaussianNoiseAttack
-from .label_flipping import LabelFlippingAttack
+from .label_flipping import LabelFlippingAttack, label_flipping_metadata
 from .lie import LieAttack, apply_lie_round, lie_parameters, rewrite_lie_uploads
 from .mixed import (
     MixedAttack,
@@ -64,6 +64,7 @@ __all__ = [
     "mixed_attack_ids",
     "mixed_attack_metadata",
     "lie_parameters",
+    "label_flipping_metadata",
     "rewrite_lie_uploads",
     "rewrite_minmax_uploads",
     "rewrite_minsum_uploads",

@@ -11,6 +11,7 @@ from src.attacks import (
     ATTACK_EVALUATORS,
     ATTACK_METADATA_BUILDERS,
     ATTACK_REGISTRY,
+    LabelFlippingAttack,
     ROUND_ATTACK_HOOKS,
     MixedAttack,
     apply_round_attack,
@@ -54,11 +55,33 @@ def test_every_non_clean_attack_is_implemented_in_attacks_package() -> None:
     }
     assert set(ROUND_ATTACK_HOOKS) == {"lie", "minmax", "minsum", "mix"}
     assert set(ATTACK_EVALUATORS) == {"bd", "mix"}
-    assert set(ATTACK_METADATA_BUILDERS) == {"lie", "minmax", "minsum", "mix"}
+    assert set(ATTACK_METADATA_BUILDERS) == {"lf", "lie", "minmax", "minsum", "mix"}
     assert all(
         attack_id == "none" or attack.__module__.startswith("src.attacks.")
         for attack_id, attack in ATTACK_REGISTRY.items()
     )
+
+
+def test_label_flipping_matches_feddmc_random_other_class_definition() -> None:
+    config = FedConfig(num_classes=4)
+    attacker = LabelFlippingAttack.__new__(LabelFlippingAttack)
+    attacker.config = config
+    labels = torch.tensor([0, 1, 2, 3] * 64, dtype=torch.long)
+    inputs = torch.zeros((labels.numel(), 1), dtype=torch.float32)
+
+    torch.manual_seed(17)
+    _inputs, flipped = attacker._transform_batch(inputs, labels)
+    torch.manual_seed(17)
+    _inputs_again, repeated = attacker._transform_batch(inputs, labels)
+
+    assert torch.equal(flipped, repeated)
+    assert torch.all(flipped != labels)
+    assert int(flipped.min().item()) >= 0
+    assert int(flipped.max().item()) < config.num_classes
+    assert attack_metadata("lf", config) == {
+        "label_flipping_variant": "uniform_random_other_class",
+        "label_flipping_reference": "FedDMC (Mu et al., TDSC 2024)",
+    }
 
 
 def test_mixed_attack_delegates_deterministically() -> None:

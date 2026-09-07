@@ -21,7 +21,7 @@ from .distance import (
     validate_distance_attack_config,
 )
 from .gaussian import GaussianNoiseAttack
-from .label_flipping import LabelFlippingAttack
+from .label_flipping import LabelFlippingAttack, label_flipping_metadata
 from .lie import LieAttack, apply_lie_round, lie_attack_metadata, validate_lie_config
 from .mixed import (
     MixedAttack,
@@ -71,6 +71,7 @@ ATTACK_EVALUATORS: Dict[str, AttackEvaluator] = {
 }
 
 ATTACK_METADATA_BUILDERS: Dict[str, AttackMetadataBuilder] = {
+    "lf": label_flipping_metadata,
     "lie": lie_attack_metadata,
     "minmax": lambda config: distance_attack_metadata(config, "minmax"),
     "minsum": lambda config: distance_attack_metadata(config, "minsum"),
