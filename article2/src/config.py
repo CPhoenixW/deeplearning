@@ -43,7 +43,7 @@ class FedConfig:
     trimmed_mean_num_byzantine: int | None = None
     krum_num_byzantine: int | None = None
     multi_krum_num_selected: int | None = None
-    # --- Attack type (short IDs: none, gn, lf, sf, bd, lie, minmax, minsum, mix; aliases accepted) ---
+    # --- Attack type (short IDs: none, gn, lf, sf, bd, lie, lit, scaling, minmax, minsum, mix; aliases accepted) ---
     attack_type: str = "bd"
     # Comma-separated attack IDs assigned deterministically across malicious
     # clients for the mixed-attack experiment (e.g.
@@ -107,6 +107,12 @@ class FedConfig:
     # Backdoor model-replacement strength.
     # upload = global + scale * (local - global), scale=1.0 means no amplification.
     backdoor_model_replace_scale: float = 3.0
+    # FedDMC reference targeted-backdoor attacks.  These are deliberately
+    # separate from the existing generic ``bd`` and statistical ``lie`` IDs.
+    feddmc_backdoor_target_label: int = 0
+    lit_regularization: float = 0.2
+    lit_clip_z: float = 0.48
+    lit_backdoor_batch_size: int = 64
 
     # --- AE / Encoder ---
     latent_dim: int = 64
@@ -275,6 +281,8 @@ ATTACK_ALIASES: dict[str, str] = {
     "backdoor": "bd",
     "lie_attack": "lie",
     "alie": "lie",
+    "lit_attack": "lit",
+    "scaling_attack": "scaling",
     "minmax": "minmax",
     "min_max": "minmax",
     "min-max": "minmax",

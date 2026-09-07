@@ -12,6 +12,7 @@ from src.attacks import (
     ATTACK_METADATA_BUILDERS,
     ATTACK_REGISTRY,
     ROUND_ATTACK_HOOKS,
+    ScalingAttack,
     MixedAttack,
     apply_round_attack,
     attack_metadata,
@@ -48,17 +49,107 @@ def test_every_non_clean_attack_is_implemented_in_attacks_package() -> None:
         "sf",
         "bd",
         "lie",
+        "lit",
+        "scaling",
         "minmax",
         "minsum",
         "mix",
     }
-    assert set(ROUND_ATTACK_HOOKS) == {"lie", "minmax", "minsum", "mix"}
-    assert set(ATTACK_EVALUATORS) == {"bd", "mix"}
-    assert set(ATTACK_METADATA_BUILDERS) == {"lie", "minmax", "minsum", "mix"}
+    assert set(ROUND_ATTACK_HOOKS) == {"lie", "lit", "minmax", "minsum", "mix"}
+    assert set(ATTACK_EVALUATORS) == {"bd", "lit", "scaling", "mix"}
+    assert set(ATTACK_METADATA_BUILDERS) == {
+        "lie", "lit", "scaling", "minmax", "minsum", "mix"
+    }
     assert all(
         attack_id == "none" or attack.__module__.startswith("src.attacks.")
         for attack_id, attack in ATTACK_REGISTRY.items()
     )
+
+
+def test_scaling_attack_matches_feddmc_half_batch_and_scale_rule() -> None:
+    config = FedConfig(
+        num_clients=10,
+        num_benign=6,
+        feddmc_backdoor_target_label=2,
+    )
+    attack = ScalingAttack.__new__(ScalingAttack)
+    attack.config = config
+    inputs = torch.zeros((4, 1, 28, 28), dtype=torch.float32)
+    labels = torch.tensor([0, 1, 3, 4], dtype=torch.long)
+    poisoned, poisoned_labels = attack._transform_batch(inputs, labels)
+
+    assert torch.equal(poisoned_labels, torch.tensor([2, 2, 3, 4]))
+    assert torch.all(poisoned[:2, 0, 1, 24:27] == 1.0)
+    assert torch.equal(poisoned[2:], inputs[2:])
+    global_state = _state(2.0)
+    local_state = _state(6.0)
+    # Source multiplier: N / M / 2 = 10 / 4 / 2 = 1.25.
+    assert torch.equal(
+        attack._postprocess_upload(global_state, local_state)["weight"],
+        torch.tensor([7.0]),
+    )
+
+
+def test_lit_uses_malicious_preliminary_mean_and_shared_bounded_upload() -> None:
+    class LITTrainer:
+        def __init__(self) -> None:
+            self.mean_states: list[dict[str, torch.Tensor]] = []
+
+        def _train_backdoor_from_mean(
+            self, mean_state: dict[str, torch.Tensor]
+        ) -> dict[str, torch.Tensor]:
+            self.mean_states.append(mean_state)
+            return {
+                "weight": mean_state["weight"].clone(),
+                "running_mean": mean_state["running_mean"].clone(),
+                "counter": mean_state["counter"].clone(),
+            }
+
+    config = FedConfig(
+        num_clients=4,
+        num_benign=2,
+        client_lr=1.0,
+        lit_clip_z=0.0,
+        attack_type="lit",
+    )
+    global_state = _parameter_state(torch.tensor([10.0]), running=17.0)
+    client_states = [
+        _parameter_state(torch.tensor([9.0]), running=1.0),
+        _parameter_state(torch.tensor([8.0]), running=2.0),
+        _parameter_state(torch.tensor([8.0]), running=3.0),
+        _parameter_state(torch.tensor([6.0]), running=4.0),
+    ]
+    first, second = LITTrainer(), LITTrainer()
+
+    apply_round_attack(
+        config,
+        "avg",
+        global_state,
+        client_states,
+        parameter_names=("weight",),
+        attack_clients=(object(), object(), first, second),
+    )
+
+    # With z=0 the envelope contracts to the mean malicious preliminary
+    # gradient, so both final uploads equal their mean pre-LIT state: (8+6)/2.
+    for client_id in (2, 3):
+        assert torch.equal(client_states[client_id]["weight"], torch.tensor([7.0]))
+        assert torch.equal(client_states[client_id]["running_mean"], global_state["running_mean"])
+        assert torch.equal(client_states[client_id]["counter"], global_state["counter"])
+    assert len(first.mean_states) == len(second.mean_states) == 1
+    assert torch.equal(first.mean_states[0]["weight"], torch.tensor([7.0]))
+    assert attack_metadata("lit", config)["lit_clip_z"] == 0.0
+    assert attack_metadata("scaling", config)["scaling_factor"] == 1.0
+
+
+def test_scaling_requires_at_least_one_malicious_client() -> None:
+    config = FedConfig(num_clients=4, num_benign=4, attack_type="scaling")
+    try:
+        validate_attack_config("scaling", config)
+    except ValueError as error:
+        assert "at least one malicious client" in str(error)
+    else:
+        raise AssertionError("Scaling must reject a configuration without attackers.")
 
 
 def test_mixed_attack_delegates_deterministically() -> None:
