@@ -119,8 +119,7 @@ class FedConfig:
     ae_lr: float = 1e-3
     ae_weight_decay: float = 1e-6
     ae_grad_clip: float = 1.0
-    # The fixed layer-aware descriptor maps complete parameter states to 4096
-    # dimensions and uses the selected normalization afterwards.
+    # Fixed 4096-D layer-aware CountSketch of complete parameter states.
     svdd_input_mode: str = "absolute"
     svdd_input_dim: int = 4096
     svdd_normalization: str = "mean_std"
@@ -190,12 +189,11 @@ class FedConfig:
     # best validation accuracy. ``largest`` preserves the historical rule;
     # ``median`` uses the numeric median of the tied rejection ratios.
     svdd_validation_tie_break: str = "largest"
-    # Client-selection rule used by the SVDD defense. ``topk_validation``
-    # preserves the historical validation-driven selector; ``mad_threshold``
+    # Client-selection rule used by the SVDD defense. ``mad_threshold``
     # accepts finite clients whose anomaly score is at most
     # median(score) + svdd_mad_k * MAD(score).
-    svdd_selection_method: str = "topk_validation"
-    svdd_mad_k: float = 3.0
+    svdd_selection_method: str = "mad_threshold"
+    svdd_mad_k: float = 0.5
     # Deprecated compatibility field.  ``legacy`` means reconstruction in
     # Phase 1 and SVDD distance in Phase 2.  A non-legacy value preserves old
     # sensitivity runs that applied one mode to both phases.

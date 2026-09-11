@@ -85,6 +85,7 @@ class SVDDDefense(BaseDefense):
             seed=int(getattr(config, "svdd_descriptor_seed", 2027)),
             projection_device=projection_device,
         )
+        self.descriptor_layout = self.descriptor.layout
         # Keep the configured latent dimension so the sensitivity sweep can
         # evaluate both compressed and overcomplete representations.
         latent_dim = int(config.latent_dim)
@@ -107,23 +108,19 @@ class SVDDDefense(BaseDefense):
     def _svdd_loss(embedding: Tensor, center: Tensor) -> Tensor:
         return ((embedding - center) ** 2).sum(dim=1)
 
-    @staticmethod
-    def _rank_score(values: Tensor) -> Tensor:
-        """Map finite anomaly values to [0, 1] ranks, preserving invalid rows."""
+    def _robust_standardize(self, values: Tensor) -> Tensor:
+        """Median/MAD-standardize finite client scores, preserving invalid rows."""
 
         values = values.float()
         finite = torch.isfinite(values)
         result = torch.full_like(values, float("inf"))
-        indices = torch.where(finite)[0]
-        if indices.numel() == 0:
+        if not bool(finite.any().item()):
             return result
-        order = indices[torch.argsort(values[indices], stable=True)]
-        if order.numel() == 1:
-            result[order] = 0.0
-        else:
-            result[order] = torch.arange(
-                order.numel(), device=values.device, dtype=values.dtype
-            ) / float(order.numel() - 1)
+        valid = values[finite]
+        median = valid.median()
+        scale = (valid - median).abs().median() * 1.4826
+        scale = scale.clamp_min(self.normalization_eps)
+        result[finite] = (valid - median) / scale
         return result
 
     def _validation_accuracy(self) -> float:
@@ -468,9 +465,9 @@ class SVDDDefense(BaseDefense):
             d,
             torch.full_like(d, float("inf")),
         )
-        recon_rank = self._rank_score(recon_per_client.to(self.device))
-        svdd_rank = self._rank_score(d)
-        selection_scores = 0.5 * (recon_rank + svdd_rank)
+        recon_standardized = self._robust_standardize(recon_per_client.to(self.device))
+        svdd_standardized = self._robust_standardize(d)
+        selection_scores = recon_standardized + svdd_standardized
         valid_scores = torch.isfinite(recon_per_client.to(self.device)) & torch.isfinite(d)
         selection_scores = torch.where(
             valid_scores,
@@ -571,11 +568,15 @@ class SVDDDefense(BaseDefense):
         monitor = [
             ("Defense", "SVDD"),
             ("Input Mode", self.input_mode),
+            (
+                "Descriptor",
+                f"Layer {self.descriptor_layout.layer_dim} + Global {self.descriptor_layout.global_dim}",
+            ),
             ("Phase 1 Score", self.phase1_score_mode),
             ("Phase 2 Score", self.phase2_score_mode),
             ("Kept clients", f"{kept}/{total}"),
             ("Selected reject ratio", f"{selected_ratio:.2f}"),
-            ("Validation accuracy", f"{validation_accuracy:.6f}"),
+            ("Selection", "MAD hard threshold (no validation data)"),
             ("Center L2-Norm", f"{center_norm:.6f}"),
             ("Z-Space Variance", f"{z_var:.6f}"),
         ]
@@ -595,6 +596,8 @@ class SVDDDefense(BaseDefense):
             show_detection=True,
             monitor_items=monitor,
             server_metrics={
+                "descriptor_layer_dim": float(self.descriptor_layout.layer_dim),
+                "descriptor_global_dim": float(self.descriptor_layout.global_dim),
                 "selected_reject_ratio": selected_ratio,
                 "validation_accuracy": validation_accuracy,
                 "validation_candidates": candidates,

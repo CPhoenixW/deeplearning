@@ -25,6 +25,7 @@ from .contracts import PipelineContext
 from .stages import (
     AttackStage,
     ClientStage,
+    ClientStateSanitizeStage,
     ClientTrainStage,
     ConfigStage,
     DataStage,
@@ -367,14 +368,19 @@ def run_pipeline(context: PipelineContext) -> PipelineContext:
             config, context.device, model_fn
         )
 
-    RoundPipeline(
-        ClientTrainStage(train_clients_batched_or_serial),
+    stages = [ClientTrainStage(train_clients_batched_or_serial)]
+    # The method evaluates the submitted model states themselves: non-finite
+    # submissions are rejected by SVDD, not replaced before detection.
+    if config.defense_type != "svdd":
+        stages.append(ClientStateSanitizeStage())
+    stages.extend([
         AttackStage(apply_round_attack),
         UploadClipStage(),
         DefenseStage(),
         EvaluationStage(evaluate, _build_round_event, _evaluate_extra),
         OutputStage(print_round_event),
-    ).run(context)
+    ])
+    RoundPipeline(*stages).run(context)
     return context
 
 

@@ -198,6 +198,37 @@ def _clone_state_dict(state_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
     return {key: value.detach().cpu().clone() for key, value in state_dict.items()}
 
 
+def sanitize_client_updates(
+    client_state_dicts: List[Dict[str, Tensor]],
+    reference_state_dict: Dict[str, Tensor],
+) -> Tuple[List[Dict[str, Tensor]], int]:
+    """Replace non-finite client states with the finite global reference.
+
+    This is intentionally a pre-attack integrity boundary.  Coordinated
+    attacks need finite benign updates to compute their statistics; update-norm
+    clipping runs later, after those attack hooks have already consumed them.
+    """
+
+    reference = _clone_state_dict(reference_state_dict)
+    if not state_dict_is_finite(reference):
+        raise FloatingPointError("Global reference state is non-finite.")
+    sanitized: List[Dict[str, Tensor]] = []
+    replaced = 0
+    for state_dict in client_state_dicts:
+        valid = state_dict.keys() == reference.keys() and state_dict_is_finite(state_dict)
+        if valid:
+            valid = all(
+                tuple(state_dict[key].shape) == tuple(reference_value.shape)
+                for key, reference_value in reference.items()
+            )
+        if valid:
+            sanitized.append(state_dict)
+        else:
+            sanitized.append(_clone_state_dict(reference))
+            replaced += 1
+    return sanitized, replaced
+
+
 def clip_client_updates(
     client_state_dicts: List[Dict[str, Tensor]],
     reference_state_dict: Dict[str, Tensor],

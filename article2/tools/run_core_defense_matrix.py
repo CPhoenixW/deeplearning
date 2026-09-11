@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # Canonical registry names accepted by this comparison scheduler.  Keep the
 # default CLI value below as the original three baselines, while allowing an
 # extended matrix to opt into the additional defenses without a second runner.
-SUPPORTED_DEFENSES = ("avg", "tm", "mk", "lasa", "seca", "bnguard", "dmc", "fld")
+SUPPORTED_DEFENSES = ("avg", "tm", "mk", "lasa", "seca", "bnguard", "dmc", "fld", "svdd")
 CORE_DEFENSES = SUPPORTED_DEFENSES
 DEFAULT_ATTACKS = (
     "none",
@@ -32,6 +32,8 @@ DEFAULT_ATTACKS = (
     "sf",
     "bd",
     "lie",
+    "lit",
+    "scaling",
     "minmax",
     "minsum",
     "mix",
@@ -47,6 +49,11 @@ BASE_OVERRIDES: dict[str, Any] = {
     "client_lr": 0.1,
     "client_momentum": 0.9,
     "client_weight_decay": 0.0,
+    # Gradient clipping is a local optimizer numerical safeguard.  Uploaded
+    # models remain untouched: the server sees their original post-attack
+    # states, as required by the SVDD method.
+    "client_grad_clip": 5.0,
+    "client_update_clip": None,
     "local_epochs": 1,
     "batch_size": 64,
     "num_workers": 0,
@@ -61,6 +68,13 @@ BASE_OVERRIDES: dict[str, Any] = {
     "hf_datasets_offline": True,
     "mixed_attack_types": "lf,bd,gn,sf,lie,minmax,minsum",
     "device": "cuda",
+    "svdd_selection_method": "mad_threshold",
+    "svdd_mad_k": 0.5,
+    "svdd_lambda": 0.5,
+    "latent_dim": 64,
+    "phase1_rounds": 15,
+    "phase2_recon_quantile": 0.5,
+    "center_ema_decay": 0.9,
 }
 
 
@@ -112,11 +126,18 @@ def _write_config(
     attack: str,
     seed: int,
     rounds: int,
+    dirichlet_alpha: float,
 ) -> tuple[Path, Path]:
     output_dir = root / defense / f"seed_{seed}"
     config_path = root / "_configs" / defense / f"seed_{seed}" / f"{attack}.json"
     overrides = dict(BASE_OVERRIDES)
-    overrides.update({"seed": int(seed), "total_rounds": int(rounds)})
+    overrides.update(
+        {
+            "seed": int(seed),
+            "total_rounds": int(rounds),
+            "dirichlet_alpha": float(dirichlet_alpha),
+        }
+    )
     payload = {
         "task": task,
         "attacks": attack,
@@ -139,31 +160,34 @@ def _build_jobs(
     task: str,
     defenses: Sequence[str],
     attacks: Sequence[str],
-    seed: int,
+    seeds: Sequence[int],
     rounds: int,
+    dirichlet_alpha: float,
     force: bool,
 ) -> list[tuple[str, str, Path, Path]]:
     jobs: list[tuple[str, str, Path, Path]] = []
     # Interleave defenses so a worker queue distributes computationally
     # different aggregators across all GPUs from the first wave.
-    for attack in attacks:
-        for defense in defenses:
-            config_path, output_dir = _write_config(
-                root,
-                task=task,
-                defense=defense,
-                attack=attack,
-                seed=seed,
-                rounds=rounds,
-            )
-            if force or not _complete(
-                output_dir,
-                task=task,
-                attack=attack,
-                defense=defense,
-                rounds=rounds,
-            ):
-                jobs.append((defense, attack, config_path, output_dir))
+    for seed in seeds:
+        for attack in attacks:
+            for defense in defenses:
+                config_path, output_dir = _write_config(
+                    root,
+                    task=task,
+                    defense=defense,
+                    attack=attack,
+                    seed=seed,
+                    rounds=rounds,
+                    dirichlet_alpha=dirichlet_alpha,
+                )
+                if force or not _complete(
+                    output_dir,
+                    task=task,
+                    attack=attack,
+                    defense=defense,
+                    rounds=rounds,
+                ):
+                    jobs.append((defense, attack, config_path, output_dir))
     return jobs
 
 
@@ -173,7 +197,18 @@ def main() -> int:
     parser.add_argument("--defenses", default=",".join(CORE_DEFENSES))
     parser.add_argument("--attacks", default=",".join(DEFAULT_ATTACKS))
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seeds",
+        default=None,
+        help="Optional comma-separated seed list; overrides --seed when provided.",
+    )
     parser.add_argument("--rounds", type=int, default=300)
+    parser.add_argument(
+        "--dirichlet-alpha",
+        type=float,
+        default=float(BASE_OVERRIDES["dirichlet_alpha"]),
+        help="Positive Dirichlet concentration for non-IID client partitions.",
+    )
     parser.add_argument("--gpus", default="0,1,2")
     parser.add_argument("--workers-per-gpu", type=int, default=3)
     parser.add_argument(
@@ -188,6 +223,12 @@ def main() -> int:
         default=Path("log/fashion_mnist_core_baselines"),
     )
     parser.add_argument("--python", dest="python_bin", default=".venv/bin/python")
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=PROJECT_ROOT,
+        help="Project directory in which each pipeline subprocess runs.",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -195,6 +236,7 @@ def main() -> int:
     defenses = _parse_csv(args.defenses)
     attacks = _parse_csv(args.attacks)
     gpus = _parse_csv(args.gpus, cast=int)
+    seeds = _parse_csv(args.seeds, cast=int) if args.seeds is not None else (int(args.seed),)
     unknown_defenses = sorted(set(defenses) - set(SUPPORTED_DEFENSES))
     unknown_attacks = sorted(set(attacks) - set(DEFAULT_ATTACKS))
     if unknown_defenses:
@@ -205,23 +247,34 @@ def main() -> int:
         forbidden = sorted(set(attacks) & {"bd", "mix"})
         if forbidden:
             parser.error(f"AG News does not support image-trigger attacks: {forbidden}")
-    if args.rounds < 1 or args.workers_per_gpu < 1 or args.omp_threads < 1:
-        parser.error("--rounds, --workers-per-gpu, and --omp-threads must be positive")
+    if (
+        args.rounds < 1
+        or args.workers_per_gpu < 1
+        or args.omp_threads < 1
+        or args.dirichlet_alpha <= 0.0
+    ):
+        parser.error(
+            "--rounds, --workers-per-gpu, --omp-threads, and --dirichlet-alpha must be positive"
+        )
 
     root = args.output_root.resolve()
+    project_root = args.project_root.resolve()
+    if not (project_root / "src" / "pipeline.py").is_file():
+        parser.error(f"--project-root does not contain src/pipeline.py: {project_root}")
     jobs = _build_jobs(
         root,
         task=str(args.task),
         defenses=defenses,
         attacks=attacks,
-        seed=int(args.seed),
+        seeds=seeds,
         rounds=int(args.rounds),
+        dirichlet_alpha=float(args.dirichlet_alpha),
         force=bool(args.force),
     )
     print(
-        f"jobs={len(jobs)} task={args.task} defenses={list(defenses)} "
+        f"jobs={len(jobs)} task={args.task} defenses={list(defenses)} seeds={list(seeds)} "
         f"attacks={list(attacks)} gpus={list(gpus)} "
-        f"workers_per_gpu={args.workers_per_gpu}"
+        f"workers_per_gpu={args.workers_per_gpu} dirichlet_alpha={args.dirichlet_alpha}"
     )
     for defense, attack, config_path, _output_dir in jobs:
         print(f"PENDING defense={defense} attack={attack} config={config_path}")
@@ -264,7 +317,7 @@ def main() -> int:
             with console_path.open("a", encoding="utf-8") as console:
                 completed = subprocess.run(
                     command,
-                    cwd=str(PROJECT_ROOT),
+                    cwd=str(project_root),
                     env=env,
                     stdout=console,
                     stderr=subprocess.STDOUT,
@@ -285,8 +338,8 @@ def main() -> int:
 
     threads = [
         threading.Thread(target=worker, args=(gpu, worker_id), daemon=False)
-        for gpu in gpus
         for worker_id in range(int(args.workers_per_gpu))
+        for gpu in gpus
     ]
     for thread in threads:
         thread.start()
