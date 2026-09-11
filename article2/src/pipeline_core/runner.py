@@ -235,7 +235,10 @@ def _create_defense(context: PipelineContext):
         "model_fn": model_fn,
     }
     if context.defense_name == "svdd":
-        kwargs["validation_loader"] = context.validation_loader
+        # AE-SVDD's method-aligned MAD selection is data-free on the server:
+        # a held-out loader may exist for task plumbing, but is never exposed
+        # to the defense instance.
+        kwargs["validation_loader"] = None
     return defense_cls(**kwargs), model_fn
 
 

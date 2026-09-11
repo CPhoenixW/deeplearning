@@ -59,6 +59,7 @@ def _factor_specs(
 
 def _overrides(
     *,
+    task: str,
     svdd_lambda: float,
     phase1_rounds: int,
     latent_dim: int,
@@ -66,11 +67,19 @@ def _overrides(
     seed: int,
     rounds: int,
 ) -> dict[str, Any]:
+    task_weight_decay = {"mnist": 1e-4, "fashion_mnist": 0.0}.get(task, 0.0)
     return {
         "num_clients": 100,
         "num_malicious": 30,
         "total_rounds": int(rounds),
+        # The task builder still creates a fixed held-out split, but the
+        # method-aligned MAD selector never receives or evaluates it.
         "server_validation_size": int(validation_size),
+        "client_lr": 0.1,
+        "client_momentum": 0.9,
+        "client_weight_decay": task_weight_decay,
+        "client_grad_clip": 5.0,
+        "client_update_clip": None,
         "local_epochs": 1,
         "batch_size": 64,
         "num_workers": 0,
@@ -84,9 +93,18 @@ def _overrides(
         "dirichlet_alpha": 1.0,
         "hf_datasets_offline": True,
         "phase1_rounds": int(phase1_rounds),
+        "phase1_score_mode": "recon",
+        "phase2_score_mode": "combined",
         "svdd_lambda": float(svdd_lambda),
         "latent_dim": int(latent_dim),
+        "svdd_input_mode": "absolute",
+        "svdd_input_dim": 4096,
+        "svdd_normalization": "median_mad",
         "svdd_normalization_eps": 1e-6,
+        "svdd_selection_method": "mad_threshold",
+        "svdd_mad_k": 0.5,
+        "center_ema_decay": 0.9,
+        "phase2_recon_quantile": 0.5,
         "device": "cuda",
         "seed": int(seed),
     }
@@ -115,6 +133,7 @@ def _write_config(
         "fed_config_file": "configs/federated.json",
         "hyperparameters_file": "configs/hyperparameters.json",
         "fed_config_overrides": _overrides(
+            task=task,
             svdd_lambda=svdd_lambda,
             phase1_rounds=phase1_rounds,
             latent_dim=latent_dim,
@@ -159,6 +178,11 @@ def _complete(
         and int(effective.get("phase1_rounds", -1)) == int(phase1_rounds)
         and int(effective.get("latent_dim", -1)) == int(latent_dim)
         and int(effective.get("server_validation_size", -1)) == int(validation_size)
+        and float(effective.get("dirichlet_alpha", -1.0)) == 1.0
+        and effective.get("phase1_score_mode") == "recon"
+        and effective.get("phase2_score_mode") == "combined"
+        and effective.get("svdd_selection_method") == "mad_threshold"
+        and abs(float(effective.get("svdd_mad_k", -1.0)) - 0.5) < 1e-8
         and abs(float(effective.get("svdd_lambda", -1.0)) - float(svdd_lambda)) < 1e-8
     )
 
