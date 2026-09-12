@@ -122,6 +122,7 @@ class AttackStage:
             context.global_state,
             context.client_states,
             parameter_names,
+            context.clients,
         )
         return context
 
