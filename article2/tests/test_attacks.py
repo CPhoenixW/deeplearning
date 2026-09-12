@@ -13,6 +13,8 @@ from src.attacks import (
     ATTACK_REGISTRY,
     ROUND_ATTACK_HOOKS,
     MixedAttack,
+    ScalingAttack,
+    apply_feddmc_trigger,
     apply_round_attack,
     attack_metadata,
     evaluate_attack,
@@ -48,17 +50,74 @@ def test_every_non_clean_attack_is_implemented_in_attacks_package() -> None:
         "sf",
         "bd",
         "lie",
+        "lit",
+        "scaling",
         "minmax",
         "minsum",
         "mix",
     }
-    assert set(ROUND_ATTACK_HOOKS) == {"lie", "minmax", "minsum", "mix"}
-    assert set(ATTACK_EVALUATORS) == {"bd", "mix"}
-    assert set(ATTACK_METADATA_BUILDERS) == {"lie", "minmax", "minsum", "mix"}
+    assert set(ROUND_ATTACK_HOOKS) == {"lie", "lit", "minmax", "minsum", "mix"}
+    assert set(ATTACK_EVALUATORS) == {"bd", "lit", "scaling", "mix"}
+    assert set(ATTACK_METADATA_BUILDERS) == {
+        "lie",
+        "lit",
+        "scaling",
+        "minmax",
+        "minsum",
+        "mix",
+    }
     assert all(
         attack_id == "none" or attack.__module__.startswith("src.attacks.")
         for attack_id, attack in ATTACK_REGISTRY.items()
     )
+
+
+def test_feddmc_scaling_trigger_and_model_replacement_match_reference_protocol() -> None:
+    config = FedConfig(num_clients=10, num_benign=8)
+    attack = ScalingAttack(
+        8,
+        torch.device("cpu"),
+        config,
+        [],
+        lambda: (_ for _ in ()).throw(AssertionError("unused model")),
+    )
+
+    inputs = torch.zeros(4, 1, 28, 28)
+    labels = torch.ones(4, dtype=torch.long)
+    poisoned_inputs, poisoned_labels = attack._transform_batch(inputs, labels)
+    assert poisoned_labels.tolist() == [0, 0, 1, 1]
+    # Released grayscale trigger includes (row=1,col=24) and (row=5,col=26).
+    assert torch.equal(poisoned_inputs[:2, 0, 1, 24], torch.ones(2))
+    assert torch.equal(poisoned_inputs[:2, 0, 5, 26], torch.ones(2))
+    assert torch.equal(poisoned_inputs[2:], inputs[2:])
+
+    global_state = {
+        "weight": torch.tensor([1.0]),
+        "counter": torch.tensor(0, dtype=torch.long),
+    }
+    local_state = {
+        "weight": torch.tensor([3.0]),
+        "counter": torch.tensor(7, dtype=torch.long),
+    }
+    scaled = attack._postprocess_upload(global_state, local_state)
+    # N/(2M) = 10/(2*2) = 2.5, hence 1 + 2.5*(3-1) = 6.
+    assert torch.allclose(scaled["weight"], torch.tensor([6.0]))
+    assert torch.equal(scaled["counter"], global_state["counter"])
+
+    rgb = apply_feddmc_trigger(torch.zeros(1, 3, 32, 32))
+    assert torch.equal(rgb[0, :, 1, 28], torch.ones(3))
+    assert torch.equal(rgb[0, :, 5, 30], torch.ones(3))
+
+
+def test_feddmc_lit_metadata_uses_paper_z_formula_and_target_zero() -> None:
+    config = FedConfig(num_clients=100, num_benign=72, attack_type="lit")
+    validate_attack_config("lit", config)
+    metadata = attack_metadata("lit", config)
+    s, expected_z = lie_parameters(config, attacker_count=28)
+    assert metadata["lit_s"] == s
+    assert abs(float(metadata["lit_z"]) - expected_z) < 1e-8
+    assert metadata["lit_target_label"] == 0
+    assert metadata["lit_second_pass_poison_fraction"] == 1.0
 
 
 def test_mixed_attack_delegates_deterministically() -> None:
@@ -81,6 +140,21 @@ def test_mixed_attack_delegates_deterministically() -> None:
         )
         assert mixed.attack_id == attack_id
         assert mixed.delegate.__class__ is ATTACK_REGISTRY[attack_id]
+
+
+def test_mixed_attack_rejects_undefined_lit_composition() -> None:
+    config = FedConfig(
+        num_clients=6,
+        num_benign=2,
+        attack_type="mix",
+        mixed_attack_types="lf,lit,gn",
+    )
+    try:
+        validate_attack_config("mix", config)
+    except ValueError as exc:
+        assert "standalone" in str(exc)
+    else:
+        raise AssertionError("mixed LIT must be rejected rather than silently misimplemented")
 
 
 def test_mixed_round_hook_rewrites_only_lie_clients() -> None:

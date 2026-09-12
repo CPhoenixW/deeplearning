@@ -1,0 +1,21 @@
+{
+  "task": "cifar10",
+  "attacks": "lit,scaling",
+  "defenses": "avg,svdd",
+  "log_dir": "log/feddmc_targeted_attacks_smoke",
+  "fed_config_file": "configs/federated.json",
+  "hyperparameters_file": "configs/hyperparameters.json",
+  "fed_config_overrides": {
+    "num_clients": 10,
+    "num_malicious": 3,
+    "total_rounds": 3,
+    "server_validation_size": 20,
+    "local_epochs": 1,
+    "batch_size": 64,
+    "client_batch_group_size": 1,
+    "phase1_rounds": 1,
+    "round_diagnostics": true,
+    "seed": 42,
+    "device": "cuda"
+  }
+}
