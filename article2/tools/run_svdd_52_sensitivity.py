@@ -21,6 +21,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TASKS = ("mnist", "fashion_mnist", "cifar10", "covid19", "ag_news")
+SUPPORTED_ATTACKS = ("gn", "lf", "bd", "scaling", "sf", "lie", "lit", "minmax", "minsum")
 DEFAULT_LAMBDAS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
 DEFAULT_PHASE1_ROUNDS = (5, 10, 15, 30, 50, 100)
 DEFAULT_VALIDATION_SIZES = (10, 50, 100, 500)
@@ -59,18 +60,28 @@ def _factor_specs(
 
 def _overrides(
     *,
+    task: str,
     svdd_lambda: float,
     phase1_rounds: int,
     latent_dim: int,
     validation_size: int,
+    dirichlet_alpha: float,
     seed: int,
     rounds: int,
 ) -> dict[str, Any]:
+    task_weight_decay = {"mnist": 1e-4, "fashion_mnist": 0.0}.get(task, 0.0)
     return {
         "num_clients": 100,
         "num_malicious": 30,
         "total_rounds": int(rounds),
+        # The task builder still creates a fixed held-out split, but the
+        # method-aligned MAD selector never receives or evaluates it.
         "server_validation_size": int(validation_size),
+        "client_lr": 0.1,
+        "client_momentum": 0.9,
+        "client_weight_decay": task_weight_decay,
+        "client_grad_clip": 5.0,
+        "client_update_clip": None,
         "local_epochs": 1,
         "batch_size": 64,
         "num_workers": 0,
@@ -81,12 +92,21 @@ def _overrides(
         "skip_redundant_attack_training": True,
         "client_batch_group_size": 1,
         "round_diagnostics": False,
-        "dirichlet_alpha": 1.0,
+        "dirichlet_alpha": float(dirichlet_alpha),
         "hf_datasets_offline": True,
         "phase1_rounds": int(phase1_rounds),
+        "phase1_score_mode": "recon",
+        "phase2_score_mode": "combined",
         "svdd_lambda": float(svdd_lambda),
         "latent_dim": int(latent_dim),
+        "svdd_input_mode": "absolute",
+        "svdd_input_dim": 4096,
+        "svdd_normalization": "median_mad",
         "svdd_normalization_eps": 1e-6,
+        "svdd_selection_method": "mad_threshold",
+        "svdd_mad_k": 0.5,
+        "center_ema_decay": 0.9,
+        "phase2_recon_quantile": 0.5,
         "device": "cuda",
         "seed": int(seed),
     }
@@ -97,28 +117,32 @@ def _write_config(
     *,
     task: str,
     factor: str,
+    attack: str,
     svdd_lambda: float,
     phase1_rounds: int,
     latent_dim: int,
     validation_size: int,
+    dirichlet_alpha: float,
     seed: int,
     rounds: int,
 ) -> tuple[Path, Path]:
-    output_dir = (root / task / factor / f"seed_{seed}").resolve()
-    config_path = (root / "_configs" / task / factor / f"seed_{seed}.json").resolve()
+    output_dir = (root / task / factor / attack / f"seed_{seed}").resolve()
+    config_path = (root / "_configs" / task / factor / attack / f"seed_{seed}.json").resolve()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "task": task,
-        "attacks": "gn",
+        "attacks": attack,
         "defenses": "svdd",
         "log_dir": str(output_dir),
         "fed_config_file": "configs/federated.json",
         "hyperparameters_file": "configs/hyperparameters.json",
         "fed_config_overrides": _overrides(
+            task=task,
             svdd_lambda=svdd_lambda,
             phase1_rounds=phase1_rounds,
             latent_dim=latent_dim,
             validation_size=validation_size,
+            dirichlet_alpha=dirichlet_alpha,
             seed=seed,
             rounds=rounds,
         ),
@@ -132,14 +156,16 @@ def _complete(
     *,
     task: str,
     factor: str,
+    attack: str,
     svdd_lambda: float,
     phase1_rounds: int,
     latent_dim: int,
     validation_size: int,
+    dirichlet_alpha: float,
     seed: int,
     rounds: int,
 ) -> bool:
-    path = output_dir / f"{task}__gn__svdd.json"
+    path = output_dir / f"{task}__{attack}__svdd.json"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         meta = payload["meta"]
@@ -149,7 +175,7 @@ def _complete(
         return False
     return (
         meta.get("task") == task
-        and meta.get("attack") == "gn"
+        and meta.get("attack") == attack
         and meta.get("defense") == "svdd"
         and int(meta.get("total_rounds", -1)) == int(rounds)
         and len(records) == int(rounds)
@@ -159,6 +185,11 @@ def _complete(
         and int(effective.get("phase1_rounds", -1)) == int(phase1_rounds)
         and int(effective.get("latent_dim", -1)) == int(latent_dim)
         and int(effective.get("server_validation_size", -1)) == int(validation_size)
+        and abs(float(effective.get("dirichlet_alpha", -1.0)) - float(dirichlet_alpha)) < 1e-8
+        and effective.get("phase1_score_mode") == "recon"
+        and effective.get("phase2_score_mode") == "combined"
+        and effective.get("svdd_selection_method") == "mad_threshold"
+        and abs(float(effective.get("svdd_mad_k", -1.0)) - 0.5) < 1e-8
         and abs(float(effective.get("svdd_lambda", -1.0)) - float(svdd_lambda)) < 1e-8
     )
 
@@ -175,7 +206,9 @@ def main() -> int:
         default=None,
         help="Optional comma-separated factor names to run, e.g. phase1_100 or latent_0064,lambda_0p5.",
     )
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seeds", default="42")
+    parser.add_argument("--attacks", default="gn")
+    parser.add_argument("--dirichlet-alpha", type=float, default=1.0)
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--gpus", default="0,1,2")
     parser.add_argument("--workers-per-gpu", type=int, default=1)
@@ -190,9 +223,14 @@ def main() -> int:
     validation_sizes = tuple(int(value) for value in _parse_csv(args.validation_sizes, int))
     latent_dims = tuple(int(value) for value in _parse_csv(args.latent_dims, int))
     tasks = tuple(str(value) for value in _parse_csv(args.tasks, str))
+    attacks = tuple(str(value) for value in _parse_csv(args.attacks, str))
+    seeds = tuple(int(value) for value in _parse_csv(args.seeds, int))
     unknown_tasks = sorted(set(tasks) - set(TASKS))
     if unknown_tasks:
         parser.error(f"unknown tasks: {unknown_tasks}; choose from {TASKS}")
+    unknown_attacks = sorted(set(attacks) - set(SUPPORTED_ATTACKS))
+    if unknown_attacks:
+        parser.error(f"unknown attacks: {unknown_attacks}; choose from {SUPPORTED_ATTACKS}")
     if any(not 0.0 <= value <= 1.0 for value in lambdas):
         parser.error("all svdd_lambda values must be in [0, 1]")
     if any(value < 1 or value >= args.rounds for value in phase1_rounds):
@@ -201,8 +239,8 @@ def main() -> int:
         parser.error("validation sizes must be positive")
     if any(value < 1 for value in latent_dims):
         parser.error("latent dimensions must be positive")
-    if args.rounds < 1 or args.workers_per_gpu < 1:
-        parser.error("rounds and workers-per-gpu must be positive")
+    if args.rounds < 1 or args.workers_per_gpu < 1 or args.dirichlet_alpha <= 0.0:
+        parser.error("rounds, workers-per-gpu, and dirichlet-alpha must be positive")
     gpus = tuple(int(value) for value in _parse_csv(args.gpus, int))
     python_bin = Path(args.python_bin)
     if not python_bin.is_absolute():
@@ -221,53 +259,63 @@ def main() -> int:
             parser.error(f"unknown factors: {unknown_factors}; choose from {sorted(available_factors)}")
         selected = set(requested_factors)
         specs = [spec for spec in specs if spec[0] in selected]
-    jobs: list[tuple[str, str, Path, Path]] = []
+    jobs: list[tuple[str, str, str, int, Path, Path]] = []
     for task in tasks:
-        for factor, svdd_lambda, p1, latent_dim, validation_size in specs:
-            config, output = _write_config(
-                root,
-                task=task,
-                factor=factor,
-                svdd_lambda=svdd_lambda,
-                phase1_rounds=p1,
-                latent_dim=latent_dim,
-                validation_size=validation_size,
-                seed=args.seed,
-                rounds=args.rounds,
-            )
-            if not _complete(
-                output,
-                task=task,
-                factor=factor,
-                svdd_lambda=svdd_lambda,
-                phase1_rounds=p1,
-                latent_dim=latent_dim,
-                validation_size=validation_size,
-                seed=args.seed,
-                rounds=args.rounds,
-            ):
-                jobs.append((task, factor, config, output))
+        for attack in attacks:
+            for factor, svdd_lambda, p1, latent_dim, validation_size in specs:
+                for seed in seeds:
+                    config, output = _write_config(
+                        root,
+                        task=task,
+                        factor=factor,
+                        attack=attack,
+                        svdd_lambda=svdd_lambda,
+                        phase1_rounds=p1,
+                        latent_dim=latent_dim,
+                        validation_size=validation_size,
+                        dirichlet_alpha=args.dirichlet_alpha,
+                        seed=seed,
+                        rounds=args.rounds,
+                    )
+                    if not _complete(
+                        output,
+                        task=task,
+                        factor=factor,
+                        attack=attack,
+                        svdd_lambda=svdd_lambda,
+                        phase1_rounds=p1,
+                        latent_dim=latent_dim,
+                        validation_size=validation_size,
+                        dirichlet_alpha=args.dirichlet_alpha,
+                        seed=seed,
+                        rounds=args.rounds,
+                    ):
+                        jobs.append((task, factor, attack, seed, config, output))
     if args.max_jobs is not None:
         jobs = jobs[: max(0, int(args.max_jobs))]
     print(
-        f"expected={len(tasks) * len(specs)} pending={len(jobs)} tasks={len(tasks)} "
-        f"factors={len(specs)} rounds={args.rounds} seed={args.seed} attack=gn defense=svdd",
+        f"expected={len(tasks) * len(attacks) * len(specs) * len(seeds)} pending={len(jobs)} "
+        f"tasks={len(tasks)} attacks={list(attacks)} factors={len(specs)} rounds={args.rounds} "
+        f"seeds={list(seeds)} dirichlet_alpha={args.dirichlet_alpha} defense=svdd",
         flush=True,
     )
     if args.dry_run or not jobs:
         return 0
 
     worker_count = len(gpus) * args.workers_per_gpu
-    worker_queues: list[queue.Queue[tuple[str, str, Path, Path]]] = [queue.Queue() for _ in range(worker_count)]
+    worker_queues: list[queue.Queue[tuple[str, str, str, int, Path, Path]]] = [queue.Queue() for _ in range(worker_count)]
+    # Round-robin by GPU first, then worker, so small matrices use every
+    # requested device rather than filling GPU 0 before GPU 1.
+    worker_order = [gpu_index + worker * len(gpus) for worker in range(args.workers_per_gpu) for gpu_index in range(len(gpus))]
     for index, job in enumerate(jobs):
-        worker_queues[index % worker_count].put(job)
-    failures: list[tuple[str, str, int]] = []
+        worker_queues[worker_order[index % worker_count]].put(job)
+    failures: list[tuple[str, str, str, int, int]] = []
     lock = threading.Lock()
 
-    def worker(gpu: int, worker_id: int, work_queue: queue.Queue[tuple[str, str, Path, Path]]) -> None:
+    def worker(gpu: int, worker_id: int, work_queue: queue.Queue[tuple[str, str, str, int, Path, Path]]) -> None:
         while True:
             try:
-                task, factor, config, output = work_queue.get_nowait()
+                task, factor, attack, seed, config, output = work_queue.get_nowait()
             except queue.Empty:
                 return
             output.mkdir(parents=True, exist_ok=True)
@@ -296,10 +344,10 @@ def main() -> int:
                 )
             with lock:
                 if completed.returncode == 0:
-                    print(f"DONE gpu={gpu}/w{worker_id} task={task} factor={factor}", flush=True)
+                    print(f"DONE gpu={gpu}/w{worker_id} task={task} attack={attack} seed={seed} factor={factor}", flush=True)
                 else:
-                    failures.append((task, factor, int(completed.returncode)))
-                    print(f"FAIL gpu={gpu}/w{worker_id} task={task} factor={factor} exit={completed.returncode}", flush=True)
+                    failures.append((task, attack, factor, seed, int(completed.returncode)))
+                    print(f"FAIL gpu={gpu}/w{worker_id} task={task} attack={attack} seed={seed} factor={factor} exit={completed.returncode}", flush=True)
             work_queue.task_done()
 
     threads = []
@@ -320,8 +368,8 @@ def main() -> int:
         thread.join()
     if failures:
         print("failures:", flush=True)
-        for task, factor, code in failures:
-            print(f"  {task}/{factor}: exit={code}", flush=True)
+        for task, attack, factor, seed, code in failures:
+            print(f"  {task}/{attack}/{factor}/seed_{seed}: exit={code}", flush=True)
         return 1
     return 0
 

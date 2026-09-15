@@ -11,9 +11,15 @@ from torch import Tensor
 
 @dataclass(frozen=True)
 class DescriptorLayout:
+    """Layout metadata for the fixed, layer-aware CountSketch."""
+
     output_dim: int
     parameter_count: int
     layer_count: int
+    # Kept explicit in the run metadata so a result can demonstrate that no
+    # global projection segment was used.
+    layer_dim: int
+    global_dim: int
 
 
 def _stable_seed(seed: int, *parts: str) -> int:
@@ -23,22 +29,25 @@ def _stable_seed(seed: int, *parts: str) -> int:
 
 
 def _allocate_layer_dims(total: int, sizes: Sequence[int]) -> List[int]:
-    if total < len(sizes):
-        # Ultra-low-dimensional descriptors use a shared hash space instead.
-        return [0 for _ in sizes]
+    """Allocate every descriptor coordinate to a parameter tensor.
 
+    The allocation is proportional to sqrt(parameter-count), with a
+    deterministic largest-remainder pass.  This is the layer-aware mapping
+    specified by the method; there is no second global sketch.
+    """
+
+    if total < len(sizes):
+        return [0 for _ in sizes]
     allocation = [1 for _ in sizes]
     remaining = total - len(sizes)
     if remaining == 0:
         return allocation
-
     weights = [math.sqrt(float(size)) for size in sizes]
     weight_sum = sum(weights)
     exact = [remaining * weight / weight_sum for weight in weights]
     floors = [int(value) for value in exact]
     for index, value in enumerate(floors):
         allocation[index] += value
-
     leftover = remaining - sum(floors)
     order = sorted(
         range(len(sizes)),
@@ -51,11 +60,11 @@ def _allocate_layer_dims(total: int, sizes: Sequence[int]) -> List[int]:
 
 
 class FixedLayerDescriptor:
-    """Fixed 4096-D layer-aware CountSketch for federated model updates.
+    """Fixed 4096-D layer-aware CountSketch for complete client models.
 
-    Each parameter tensor owns a size-weighted section of the descriptor. Bucket
-    and sign assignments are deterministic for a model signature and seed, so
-    every client and round uses the same projection without a dense matrix.
+    Each trainable tensor owns a deterministic, size-weighted segment of the
+    one descriptor.  ``reference_state_dict`` supplies the reference point;
+    SVDD uses the all-zero state to represent absolute client parameters.
     """
 
     def __init__(
@@ -71,7 +80,6 @@ class FixedLayerDescriptor:
             raise ValueError("output_dim must be at least 64.")
         if not parameter_names:
             raise ValueError("parameter_names must not be empty.")
-
         self.output_dim = int(output_dim)
         self.seed = int(seed)
         self.projection_device = torch.device(projection_device)
@@ -94,8 +102,9 @@ class FixedLayerDescriptor:
             output_dim=self.output_dim,
             parameter_count=self._parameter_count,
             layer_count=len(self.parameter_names),
+            layer_dim=self.output_dim,
+            global_dim=0,
         )
-
         allocations = _allocate_layer_dims(self.output_dim, sizes)
         shared_hash_space = self.output_dim < len(sizes)
         buckets: List[Tensor] = []
@@ -105,67 +114,33 @@ class FixedLayerDescriptor:
             generator = torch.Generator(device="cpu")
             generator.manual_seed(_stable_seed(self.seed, "layer", name))
             if shared_hash_space:
-                buckets.append(
-                    torch.randint(
-                        0, self.output_dim, (size,), generator=generator, dtype=torch.int32
-                    )
-                )
+                buckets.append(torch.randint(0, self.output_dim, (size,), generator=generator, dtype=torch.int32))
             else:
-                buckets.append(
-                    torch.randint(0, allocated, (size,), generator=generator, dtype=torch.int32)
-                    .add_(offset)
-                )
+                buckets.append(torch.randint(0, allocated, (size,), generator=generator, dtype=torch.int32).add_(offset))
                 offset += allocated
-            signs.append(
-                torch.randint(0, 2, (size,), generator=generator, dtype=torch.int8).mul_(2).sub_(1)
-            )
-
-        self._buckets = torch.cat(buckets).to(
-            device=self.projection_device, dtype=torch.long
-        )
-        self._signs = torch.cat(signs).to(
-            device=self.projection_device, dtype=torch.float32
-        )
+            signs.append(torch.randint(0, 2, (size,), generator=generator, dtype=torch.int8).mul_(2).sub_(1))
+        self._buckets = torch.cat(buckets).to(device=self.projection_device, dtype=torch.long)
+        self._signs = torch.cat(signs).to(device=self.projection_device, dtype=torch.float32)
 
     def _validate_state_dict(self, state_dict: Dict[str, Tensor], *, label: str) -> None:
         for name, shape in zip(self.parameter_names, self._shapes):
             if name not in state_dict:
                 raise KeyError(f"Parameter {name!r} is missing from {label}.")
             if tuple(state_dict[name].shape) != shape:
-                raise ValueError(
-                    f"Shape mismatch for {name!r} in {label}: "
-                    f"{tuple(state_dict[name].shape)} != {shape}."
-                )
+                raise ValueError(f"Shape mismatch for {name!r} in {label}: {tuple(state_dict[name].shape)} != {shape}.")
 
-    def describe(
-        self,
-        client_state_dict: Dict[str, Tensor],
-        reference_state_dict: Dict[str, Tensor],
-    ) -> Tensor:
+    def describe(self, client_state_dict: Dict[str, Tensor], reference_state_dict: Dict[str, Tensor]) -> Tensor:
         self._validate_state_dict(client_state_dict, label="client_state_dict")
         self._validate_state_dict(reference_state_dict, label="reference_state_dict")
-
-        delta = torch.cat(
-            [
-                (
-                    client_state_dict[name].detach().cpu().float()
-                    - reference_state_dict[name].detach().cpu().float()
-                ).reshape(-1)
-                for name in self.parameter_names
-            ]
-        ).to(self.projection_device, non_blocking=True)
+        delta = torch.cat([
+            (client_state_dict[name].detach().cpu().float() - reference_state_dict[name].detach().cpu().float()).reshape(-1)
+            for name in self.parameter_names
+        ]).to(self.projection_device, non_blocking=True)
         descriptor = torch.zeros(self.output_dim, device=self.projection_device)
         descriptor.scatter_add_(0, self._buckets, delta * self._signs)
         return descriptor.detach().cpu()
 
-    def describe_many(
-        self,
-        client_state_dicts: Sequence[Dict[str, Tensor]],
-        reference_state_dict: Dict[str, Tensor],
-    ) -> Tensor:
+    def describe_many(self, client_state_dicts: Sequence[Dict[str, Tensor]], reference_state_dict: Dict[str, Tensor]) -> Tensor:
         if not client_state_dicts:
             raise ValueError("client_state_dicts must not be empty.")
-        return torch.stack(
-            [self.describe(state_dict, reference_state_dict) for state_dict in client_state_dicts],
-            dim=0,
-        )
+        return torch.stack([self.describe(state_dict, reference_state_dict) for state_dict in client_state_dicts], dim=0)

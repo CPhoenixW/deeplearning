@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..defenses.base import DefenseContext
-from ..utils import clip_client_updates
+from ..utils import clip_client_updates, sanitize_client_updates
 from .contracts import PipelineContext, Stage
 
 
@@ -102,6 +102,20 @@ class ClientTrainStage:
 
 
 @dataclass(frozen=True)
+class ClientStateSanitizeStage:
+    """Make client uploads safe for coordinated attack statistics."""
+
+    name: str = "client_state_sanitize"
+
+    def run(self, context: PipelineContext) -> PipelineContext:
+        context.client_states, _replaced = sanitize_client_updates(
+            context.client_states,
+            context.global_state,
+        )
+        return context
+
+
+@dataclass(frozen=True)
 class AttackStage:
     apply: Callable
     name: str = "attack"
@@ -122,6 +136,7 @@ class AttackStage:
             context.global_state,
             context.client_states,
             parameter_names,
+            attack_clients=context.clients,
         )
         return context
 

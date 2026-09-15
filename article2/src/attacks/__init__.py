@@ -13,6 +13,7 @@ from .distance import (
 from .gaussian import GaussianNoiseAttack
 from .label_flipping import LabelFlippingAttack
 from .lie import LieAttack, apply_lie_round, lie_parameters, rewrite_lie_uploads
+from .lit import LITAttack, apply_lit_round
 from .mixed import (
     MixedAttack,
     apply_mixed_round,
@@ -34,6 +35,7 @@ from .registry import (
     validate_attack_config,
 )
 from .sign_flipping import SignFlippingAttack
+from .scaling import ScalingAttack
 
 __all__ = [
     "ATTACK_CONFIG_VALIDATORS",
@@ -45,12 +47,15 @@ __all__ = [
     "GaussianNoiseAttack",
     "LabelFlippingAttack",
     "LieAttack",
+    "LITAttack",
     "MaliciousClient",
     "MinMaxAttack",
     "MinSumAttack",
     "MixedAttack",
     "SignFlippingAttack",
+    "ScalingAttack",
     "apply_lie_round",
+    "apply_lit_round",
     "apply_minmax_round",
     "apply_minsum_round",
     "apply_mixed_round",

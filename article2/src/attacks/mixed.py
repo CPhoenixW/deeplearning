@@ -35,6 +35,11 @@ def mixed_attack_ids(config: FedConfig) -> Tuple[str, ...]:
         raise ValueError("mixed_attack_types must contain at least one attack id")
     if any(attack_id in {"none", "mix"} for attack_id in attack_ids):
         raise ValueError("mixed_attack_types cannot contain 'none' or nested 'mix'")
+    if "lit" in attack_ids:
+        raise ValueError(
+            "mixed_attack_types cannot contain 'lit': LIT requires every malicious "
+            "client for its coordinated second training phase."
+        )
 
     # Local import avoids a registry/module initialization cycle.
     from .registry import ATTACK_REGISTRY

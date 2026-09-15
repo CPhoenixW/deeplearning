@@ -25,6 +25,7 @@ from .contracts import PipelineContext
 from .stages import (
     AttackStage,
     ClientStage,
+    ClientStateSanitizeStage,
     ClientTrainStage,
     ConfigStage,
     DataStage,
@@ -234,7 +235,10 @@ def _create_defense(context: PipelineContext):
         "model_fn": model_fn,
     }
     if context.defense_name == "svdd":
-        kwargs["validation_loader"] = context.validation_loader
+        # AE-SVDD's method-aligned MAD selection is data-free on the server:
+        # a held-out loader may exist for task plumbing, but is never exposed
+        # to the defense instance.
+        kwargs["validation_loader"] = None
     return defense_cls(**kwargs), model_fn
 
 
@@ -367,14 +371,19 @@ def run_pipeline(context: PipelineContext) -> PipelineContext:
             config, context.device, model_fn
         )
 
-    RoundPipeline(
-        ClientTrainStage(train_clients_batched_or_serial),
+    stages = [ClientTrainStage(train_clients_batched_or_serial)]
+    # The method evaluates the submitted model states themselves: non-finite
+    # submissions are rejected by SVDD, not replaced before detection.
+    if config.defense_type != "svdd":
+        stages.append(ClientStateSanitizeStage())
+    stages.extend([
         AttackStage(apply_round_attack),
         UploadClipStage(),
         DefenseStage(),
         EvaluationStage(evaluate, _build_round_event, _evaluate_extra),
         OutputStage(print_round_event),
-    ).run(context)
+    ])
+    RoundPipeline(*stages).run(context)
     return context
 
 
